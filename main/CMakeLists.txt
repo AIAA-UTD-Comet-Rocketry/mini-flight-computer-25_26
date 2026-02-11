@@ -1,0 +1,10 @@
+idf_component_register(SRCS "sensor_mgr.c" "i2ctools_example_main.c"
+                            "cmd_i2ctools.c"
+                            "BSP.c"
+                            "gpio_mgr.c"
+                       INCLUDE_DIRS "."
+                       REQUIRES "esp_driver_gpio"
+                                "esp_driver_i2c"
+                                "esp_driver_twai"
+                                "esp_driver_ledc"
+                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X AHRS)
