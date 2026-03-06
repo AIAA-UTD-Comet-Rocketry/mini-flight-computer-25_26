@@ -18,12 +18,12 @@
 #include <stdint.h>
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_twai.h"
+#include "esp_twai_onchip.h"
+// Peripheral libraries
 #include "iis2mdc.h"
 #include "lps22df.h"
 #include "lsm6dsv80x.h"
-#include "esp_twai.h"
-#include "esp_twai_onchip.h"
-
 // Include peripheral mappings
 #include "board_config.h"
 
