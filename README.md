@@ -212,4 +212,3 @@ i2c-tools> i2cget -c 0x5b -r 0x02 -l 8
 
 (For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you as soon as possible.)
 
-# mini-flight-computer-25_26

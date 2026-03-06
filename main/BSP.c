@@ -581,7 +581,7 @@ esp_err_t bsp_init(board_handle_t *handle, bsp_config_t *bsp_init_obj)
     // Initialize sensors
     ret |= bsp_iis2mdc_init();
     ret |= bsp_lps22df_init();
-    //ret |= bsp_lsm6dsv80x_init();
+    ret |= bsp_lsm6dsv80x_init();
 
     if (ret != ESP_OK)
     {
