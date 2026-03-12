@@ -13,13 +13,17 @@
 #include "BSP.h"
 #include "gpio_mgr.h"
 
+#define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
+
 static const char *TAG = "Main";
 
 
 // Tasks
 void vImuHandlerTask(void *pvParameters);
 void vMagHandlerTask(void *pvParameters);
-// Helpers
+void vAltHandlerTask(void *pvParameters);
+
+// Macros
 #define CHECK_TASK_CREATION(ret, err_msg) \
     if((ret) != pdPASS) { \
         ESP_LOGI(TAG, err_msg); \
@@ -46,30 +50,33 @@ void app_main(void) {
     /// Task Creation
     ////////////////////////////////
     BaseType_t task_ret;
-    TaskHandle_t xImuTaskHandle, xMagTaskHandle;
-
+    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle;
+    // IMU
     task_ret = xTaskCreate(vImuHandlerTask, 
                            "IMU Data Collection", 
-                           configMINIMAL_STACK_SIZE, 
+                           MIN_STACK_SIZE, 
                            (void*) mini_fc_handle->lsm6dsv80x_handle, 
                            1, 
                            &xImuTaskHandle);
     CHECK_TASK_CREATION(task_ret, "IMU task failed to create!");
-
+    // Magnetometer
     task_ret = xTaskCreate(vMagHandlerTask,
                            "Magnetometer Data Collection",
-                           configMINIMAL_STACK_SIZE,
+                           MIN_STACK_SIZE,
                            (void*) mini_fc_handle->iis2mdc_handle,
                            1,
                            &xMagTaskHandle);
     CHECK_TASK_CREATION(task_ret, "Magnetometer task failed to create!");
+    // Pressure
+    task_ret = xTaskCreate(vAltHandlerTask,
+                           "Absolute Pressure Data Collection",
+                           MIN_STACK_SIZE,
+                           (void*) mini_fc_handle->lps22df_handle,
+                           1,
+                           &xAltTaskHandle);
 
 
-    ///////////////////////////////
-    /// Start Scheduler
-    ////////////////////////////////
-    vTaskStartScheduler();
-
+    // Task Scheduler is automatically called as part of the ESP-IDF core functionality
 
 
     
@@ -101,7 +108,7 @@ void vImuHandlerTask(void *pvParameters) {
     LSM6DSV80X_Axes_t accel_axes;
     while(1) {
         LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
-        ESP_LOGI(TAG, "Accel X: %ld, Accel Y: %ld, Accel Z: %ld", accel_axes.x, accel_axes.y, accel_axes.z);
+        ESP_LOGI("IMU", "Accel X: %ld, Accel Y: %ld, Accel Z: %ld", accel_axes.x, accel_axes.y, accel_axes.z);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
@@ -110,7 +117,17 @@ void vMagHandlerTask(void *pvParameters) {
     IIS2MDC_Axes_t next_axis;
     while(1) {
         IIS2MDC_MAG_GetAxes(mag, &next_axis);
-        ESP_LOGI(TAG, "Mag X: %d, Mag Y: %d, Mag Z: %d", next_axis.x, next_axis.y, next_axis.z);
+        ESP_LOGI("MAG", "Mag X: %f, Mag Y: %f, Mag Z: %f", next_axis.x, next_axis.y, next_axis.z);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void vAltHandlerTask(void *pvParameters) {
+    LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
+    float_t pressure;
+    while(1) {
+        LPS22DF_PRESS_GetPressure(alt, &pressure);
+        ESP_LOGI("PRESS", "Pressure: %f", pressure);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
