@@ -85,10 +85,11 @@ void app_main(void) {
     /// Task Creation
     ////////////////////////////////
     BaseType_t task_ret;
-    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle, xSdLoggerHandle;
+    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle;
 
-    // SD Logger (only start task if SD card was mounted successfully)
-    if (sd_log_queue != NULL) {
+    // SD Logger
+    {
+        TaskHandle_t xSdLoggerHandle;
         task_ret = xTaskCreate(vSdLoggerTask,
                                "SD Logger",
                                4096,
@@ -159,7 +160,6 @@ void vImuHandlerTask(void *pvParameters) {
     LSM6DSV80X_Object_t* imu = (LSM6DSV80X_Object_t*)pvParameters;
     LSM6DSV80X_Axes_t accel_axes, gyro_axes;
     imu_calibrated_t cal_data;
-    sd_log_msg_t msg;
 
     while(1) {
         LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
@@ -168,24 +168,9 @@ void vImuHandlerTask(void *pvParameters) {
         // Apply calibration and convert units
         imu_apply_calibration(&imu_cal, &accel_axes, &gyro_axes, &cal_data);
 
-        // Update shared flight data for FSM
+        // Update shared flight data for FSM (also populates gAccel/gGyro for SD logger)
         sensor_update_flight_data(&cal_data);
 
-        // Log raw data to console
-        // ESP_LOGI("IMU", "Accel: X=%.3f Y=%.3f Z=%.3f",
-        //          accel_axes.x, accel_axes.y, accel_axes.z);
-        // ESP_LOGI("IMU", "Gyro: X=%.3f Y=%.3f Z=%.3f",
-        //          gyro_axes.x, gyro_axes.y, gyro_axes.z);
-
-        // Log calibrated data to SD card
-        msg = (sd_log_msg_t){ .type = SD_LOG_ACCEL, .timestamp_us = esp_timer_get_time(),
-                              .data.axes = { cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2] } };
-        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
-        msg = (sd_log_msg_t){ .type = SD_LOG_GYRO, .timestamp_us = esp_timer_get_time(),
-                              .data.axes = { cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2] } };
-        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
-
-        // Log calibrated values to console
         ESP_LOGI("IMU", "Accel (g): X=%.3f Y=%.3f Z=%.3f",
                  cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
         ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
@@ -196,12 +181,9 @@ void vImuHandlerTask(void *pvParameters) {
 void vMagHandlerTask(void *pvParameters) {
     IIS2MDC_Object_t* mag = (IIS2MDC_Object_t*)pvParameters;
     IIS2MDC_Axes_t next_axis;
-    sd_log_msg_t msg;
     while(1) {
         IIS2MDC_MAG_GetAxes(mag, &next_axis);
-        msg = (sd_log_msg_t){ .type = SD_LOG_MAG, .timestamp_us = esp_timer_get_time(),
-                              .data.axes = { next_axis.x, next_axis.y, next_axis.z } };
-        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
+        sensor_update_mag(next_axis.x, next_axis.y, next_axis.z);
 
         ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -219,7 +201,6 @@ void vFsmTask(void *pvParameters) {
 void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
     float_t pressure, temp;
-    sd_log_msg_t msg;
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &pressure);
         LPS22DF_TEMP_GetTemperature(alt, &temp);
@@ -230,10 +211,6 @@ void vAltHandlerTask(void *pvParameters) {
             ESP_LOGE("PRESS", "Failed to obtain Altitude data");
             continue;
         }
-
-        msg = (sd_log_msg_t){ .type = SD_LOG_PRESSURE, .timestamp_us = esp_timer_get_time(),
-                              .data.pressure_hpa = pressure };
-        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
 
         ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", pressure, gAltitude);
         vTaskDelay(pdMS_TO_TICKS(500));

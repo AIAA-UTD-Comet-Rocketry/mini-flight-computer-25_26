@@ -65,7 +65,8 @@ uint32_t transDelay = UINT32_MAX;
 #define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
 #define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
-#define LANDED_COOLDOWN_MS		10000	// 10 sec
+#define LANDED_COOLDOWN_MS		  10000	// 10 sec
+#define MACH_LOCK_TIME_MS       2000 // ms
 
 
 /* Redefined Callback Implementations, Called when new state is entered */
@@ -128,7 +129,7 @@ bool burningExitTransition(void)
    */
   if(gTotalAcc < BURNOUT_ACC_THRESH_G || (uwTick - transDelay) > MAX_BURN_TIME_MS)
   {
-    transDelay = uwTick; // Rising state requires end of burn timestamp (i.e uwTick!)
+    transDelay = uwTick + MACH_LOCK_TIME_MS; // Rising state requires end of burn timestamp (i.e uwTick!)
     return true;
   }
   return false;
@@ -235,7 +236,7 @@ bool landedExitTransition(void) // not re-launch prior to reboot
 	uint32_t landedTime = 0; // Additional landing verification
 
 	// Check for low acceleration
-	if (fabs(gTotalAcc - 1.0f) < 0.2f && fabs(gDegOffVert) < 5.0f)
+	if (fabs(gTotalAcc - 1.0f) < 0.2f)
 	{
 		if (landedTime == 0)
 		{

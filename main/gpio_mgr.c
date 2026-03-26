@@ -8,6 +8,7 @@
  */
 
 #include "gpio_mgr.h"
+#include "esp_log.h"
 
 #define PYRO_MAX_ATTEMPTS 2 // total allowed pyro drives
 #define PYRO_DRIVE_TIME  50 // ms to drive pyro channel for
@@ -116,6 +117,7 @@ const uint8_t* g_patterns[pattern_max] = {
 };
 
 uint8_t* led_set_patterns[led_max];
+static const char *TAG = "SensorMgr";
 
 
 /*---------------------------------------------------------------------
@@ -261,6 +263,8 @@ esp_err_t LED_toggle(led_index_t led)
  * 
  * Note: Task creation relies on board hardware being initialized first
  *---------------------------------------------------------------------*/
+extern uint8_t gPyroStatus;
+
 void Pyro_Task( board_handle_t *handle )
 {
     // Set up varaibles controlling pyro channels
@@ -291,17 +295,10 @@ void Pyro_Task( board_handle_t *handle )
                 gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 1); // on
                 vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
                 gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0); // off
-
-                // Repeat pyro charge ejection tries until hit max attempts
-                for(uint8_t i = 0; i < PYRO_MAX_ATTEMPTS; i++)
-                {
-                    gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 1);
-                    vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
-                    gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0);
-
-                    vTaskDelay(pdMS_TO_TICKS(PYRO_COOL_TIME));
-                }
                 
+                ESP_LOGE(TAG, "Pyro ejection for %d!", requestedChannel);
+                gPyroStatus |= (1 << requestedChannel);
+
                 // Cool off between firing to protect hardware for ematch short
                 vTaskDelay(pdMS_TO_TICKS(PYRO_COOL_TIME));
             }

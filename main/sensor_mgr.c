@@ -13,6 +13,12 @@ static const char *TAG = "SensorMgr";
 float gTotalAcc = 0;
 float gAltitude = 0;
 float gDegOffVert = 0;
+float gAccel[3] = {0};
+float gGyro[3] = {0};
+float gMag[3] = {0};
+float gPressure = 0;
+float gTemperature_F = 0;
+uint8_t gPyroStatus = 0;
 
 static float SEALEVELPRESSURE_HPA = 1013.25f; // default sea level
 
@@ -102,14 +108,21 @@ void sensor_update_altitude(float pressure_hpa, float temp) {
     float altitude_m = (R * temp_k / g) * logf(SEALEVELPRESSURE_HPA / pressure_hpa);
     gAltitude = altitude_m * 3.28084f;
 
-    // Exponential moving average to smooth noise (alpha=0.3 for responsiveness)
-    //gAltitude = 0.3f * altitude_ft + 0.7f * gAltitude;
+    // Store pressure and temperature for SD logging
+    gPressure = pressure_hpa;
+    gTemperature_F = temp * 9.0f / 5.0f + 32.0f;
 }
 
 void sensor_update_flight_data(const imu_calibrated_t *imu) {
     float ax = imu->accel_g[0];
     float ay = imu->accel_g[1];
     float az = imu->accel_g[2];
+
+    // Store calibrated values for SD logging
+    gAccel[0] = ax;  gAccel[1] = ay;  gAccel[2] = az;
+    gGyro[0] = imu->gyro_dps[0];
+    gGyro[1] = imu->gyro_dps[1];
+    gGyro[2] = imu->gyro_dps[2];
 
     gTotalAcc = sqrtf(ax * ax + ay * ay + az * az);
 
@@ -118,4 +131,10 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
         gDegOffVert = acosf(az / gTotalAcc) * (180.0f / (float)M_PI);
     }
     printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
+}
+
+void sensor_update_mag(int32_t x, int32_t y, int32_t z) {
+    gMag[0] = (float)x;
+    gMag[1] = (float)y;
+    gMag[2] = (float)z;
 }
