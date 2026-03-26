@@ -292,9 +292,15 @@ void Pyro_Task( board_handle_t *handle )
                 vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
                 gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0); // off
 
-                // If success break loop, no more retries - TODO: not implemented)
-                if(true)
-                    break;
+                // Repeat pyro charge ejection tries until hit max attempts
+                for(uint8_t i = 0; i < PYRO_MAX_ATTEMPTS; i++)
+                {
+                    gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 1);
+                    vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
+                    gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0);
+
+                    vTaskDelay(pdMS_TO_TICKS(PYRO_COOL_TIME));
+                }
                 
                 // Cool off between firing to protect hardware for ematch short
                 vTaskDelay(pdMS_TO_TICKS(PYRO_COOL_TIME));

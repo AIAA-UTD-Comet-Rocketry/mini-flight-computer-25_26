@@ -31,6 +31,9 @@ typedef enum {
 
 void      LED_Task( board_handle_t *handle );
 esp_err_t LED_setPattern( led_index_t led, pattern_index_t pattern );
+
+void      Pyro_Task( board_handle_t *handle );
+extern TaskHandle_t xPyroTaskHandle;
 esp_err_t LED_on( led_index_t led );
 esp_err_t LED_off( led_index_t led );
 esp_err_t LED_toggle( led_index_t led );

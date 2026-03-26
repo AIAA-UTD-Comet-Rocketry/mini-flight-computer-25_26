@@ -1,4 +1,4 @@
-idf_component_register(SRCS "sensor_mgr.c"
+idf_component_register(SRCS "sd_logger.c" "sensor_mgr.c"
                             "main.c"
                             "cmd_i2ctools.c"
                             "BSP.c"
@@ -8,4 +8,6 @@ idf_component_register(SRCS "sensor_mgr.c"
                                 "esp_driver_i2c"
                                 "esp_driver_twai"
                                 "esp_driver_ledc"
-                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X AHRS)
+                                "esp_driver_sdmmc"
+                                "esp_timer"
+                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X AHRS FlightFSM fatfs)

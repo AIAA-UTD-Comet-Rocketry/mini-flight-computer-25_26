@@ -12,16 +12,24 @@
 #include "freertos/FreeRTOS.h"
 #include "BSP.h"
 #include "gpio_mgr.h"
+#include "sd_logger.h"
+#include "sensor_mgr.h"
+#include "FlightFSM.h"
+#include "esp_timer.h"
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
 
 static const char *TAG = "Main";
-
+static imu_cal_t imu_cal;
+static FlightState flight_state;
 
 // Tasks
 void vImuHandlerTask(void *pvParameters);
 void vMagHandlerTask(void *pvParameters);
 void vAltHandlerTask(void *pvParameters);
+void vFsmTask(void *pvParameters);
+
+TaskHandle_t xPyroTaskHandle = NULL;
 
 // Macros
 #define CHECK_TASK_CREATION(ret, err_msg) \
@@ -35,7 +43,7 @@ void app_main(void) {
     ///////////////////////////////
     /// Configuration
     ////////////////////////////////
-    board_handle_t mini_fc_handle;
+    static board_handle_t mini_fc_handle;
 
     bsp_config_t bsp_init_cfg = {
         .Bsp_GetTick = xTaskGetTickCount,
@@ -45,12 +53,50 @@ void app_main(void) {
     //ESP_ERROR_CHECK(bsp_init(&bsp_init_cfg));
     bsp_init(&mini_fc_handle, &bsp_init_cfg);
 
+    ///////////////////////////////
+    /// IMU Calibration (blocking, ~5 seconds)
+    ////////////////////////////////
+    imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
+
+    ///////////////////////////////
+    /// Ground Pressure Reference (average 50 samples for stability)
+    ////////////////////////////////
+    float ground_pressure = 0;
+    float sample;
+    for (int i = 0; i < 50; i++) {
+        LPS22DF_PRESS_GetPressure(mini_fc_handle->lps22df_handle, &sample);
+        ground_pressure += sample;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ground_pressure /= 50.0f;
+    sensor_set_ground_pressure(ground_pressure);
+
+    ///////////////////////////////
+    /// Flight State Machine
+    ////////////////////////////////
+    initFlightState(&flight_state);
+
+    ///////////////////////////////
+    /// SD Card Logger
+    ////////////////////////////////
+    sd_logger_init(); // non-fatal if SD card is absent
 
     ///////////////////////////////
     /// Task Creation
     ////////////////////////////////
     BaseType_t task_ret;
-    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle;
+    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle, xSdLoggerHandle;
+
+    // SD Logger (only start task if SD card was mounted successfully)
+    if (sd_log_queue != NULL) {
+        task_ret = xTaskCreate(vSdLoggerTask,
+                               "SD Logger",
+                               4096,
+                               NULL,
+                               1,
+                               &xSdLoggerHandle);
+        CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
+    }
     // IMU
     task_ret = xTaskCreate(vImuHandlerTask, 
                            "IMU Data Collection", 
@@ -74,17 +120,24 @@ void app_main(void) {
                            (void*) mini_fc_handle->lps22df_handle,
                            1,
                            &xAltTaskHandle);
-
+    // Flight State Machine
+    TaskHandle_t xFsmTaskHandle;
+    task_ret = xTaskCreate(vFsmTask,
+                           "Flight FSM",
+                           4096,
+                           NULL,
+                           2,  // higher priority than sensor tasks
+                           &xFsmTaskHandle);
+    CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
 
     // Task Scheduler is automatically called as part of the ESP-IDF core functionality
 
+    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
+    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 0, &xPyroTaskHandle);
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
 
-    
-    // xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
-    // vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
-
-    // // drive led_status with pattern
-    // LED_setPattern(led_status, pattern_burst);
+    // drive led_status with pattern
+    LED_setPattern(led_status, pattern_burst);
 
     // IIS2MDC_Axes_t next_axis;
     // for(;;){
@@ -103,31 +156,86 @@ void app_main(void) {
 }
 
 void vImuHandlerTask(void *pvParameters) {
-    // Initialize the IMU object
     LSM6DSV80X_Object_t* imu = (LSM6DSV80X_Object_t*)pvParameters;
-    LSM6DSV80X_Axes_t accel_axes;
+    LSM6DSV80X_Axes_t accel_axes, gyro_axes;
+    imu_calibrated_t cal_data;
+    sd_log_msg_t msg;
+
     while(1) {
         LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
-        ESP_LOGI("IMU", "Accel X: %ld, Accel Y: %ld, Accel Z: %ld", accel_axes.x, accel_axes.y, accel_axes.z);
+        LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
+
+        // Apply calibration and convert units
+        imu_apply_calibration(&imu_cal, &accel_axes, &gyro_axes, &cal_data);
+
+        // Update shared flight data for FSM
+        sensor_update_flight_data(&cal_data);
+
+        // Log raw data to console
+        // ESP_LOGI("IMU", "Accel: X=%.3f Y=%.3f Z=%.3f",
+        //          accel_axes.x, accel_axes.y, accel_axes.z);
+        // ESP_LOGI("IMU", "Gyro: X=%.3f Y=%.3f Z=%.3f",
+        //          gyro_axes.x, gyro_axes.y, gyro_axes.z);
+
+        // Log calibrated data to SD card
+        msg = (sd_log_msg_t){ .type = SD_LOG_ACCEL, .timestamp_us = esp_timer_get_time(),
+                              .data.axes = { cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2] } };
+        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
+        msg = (sd_log_msg_t){ .type = SD_LOG_GYRO, .timestamp_us = esp_timer_get_time(),
+                              .data.axes = { cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2] } };
+        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
+
+        // Log calibrated values to console
+        ESP_LOGI("IMU", "Accel (g): X=%.3f Y=%.3f Z=%.3f",
+                 cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
+        ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
+                 cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2]);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 void vMagHandlerTask(void *pvParameters) {
     IIS2MDC_Object_t* mag = (IIS2MDC_Object_t*)pvParameters;
     IIS2MDC_Axes_t next_axis;
+    sd_log_msg_t msg;
     while(1) {
         IIS2MDC_MAG_GetAxes(mag, &next_axis);
-        ESP_LOGI("MAG", "Mag X: %f, Mag Y: %f, Mag Z: %f", next_axis.x, next_axis.y, next_axis.z);
+        msg = (sd_log_msg_t){ .type = SD_LOG_MAG, .timestamp_us = esp_timer_get_time(),
+                              .data.axes = { next_axis.x, next_axis.y, next_axis.z } };
+        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
+
+        ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
         vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void vFsmTask(void *pvParameters) {
+    (void)pvParameters;
+    while (1) {
+        updateState(&flight_state);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
 void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
-    float_t pressure;
+    float_t pressure, temp;
+    sd_log_msg_t msg;
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &pressure);
-        ESP_LOGI("PRESS", "Pressure: %f", pressure);
+        LPS22DF_TEMP_GetTemperature(alt, &temp);
+        if (pressure || temp != LPS22DF_ERROR) {
+            sensor_update_altitude(pressure, temp);
+        }
+        else {
+            ESP_LOGE("PRESS", "Failed to obtain Altitude data");
+            continue;
+        }
+
+        msg = (sd_log_msg_t){ .type = SD_LOG_PRESSURE, .timestamp_us = esp_timer_get_time(),
+                              .data.pressure_hpa = pressure };
+        if (sd_log_queue) xQueueSend(sd_log_queue, &msg, 0);
+
+        ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", pressure, gAltitude);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
