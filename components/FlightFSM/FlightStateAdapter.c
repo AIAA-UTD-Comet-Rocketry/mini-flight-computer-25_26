@@ -34,6 +34,7 @@ extern TaskHandle_t xPyroTaskHandle;
 #define PYRO_APO1_BIT   (1 << 0)  // apo1_channel - 35g CO2
 #define PYRO_APO2_BIT   (1 << 1)  // apo2_channel - 45g CO2
 #define PYRO_MAIN1_BIT  (1 << 2)  // main1_channel - TD2 ejection
+#define PYRO_MAIN2_BIT  (1 << 3)  // main2_channel - TD2 ejection
 
 /* Extern data streams (defined in sensor_mgr.c) */
 extern float gAltitude;
@@ -61,6 +62,7 @@ uint32_t transDelay = UINT32_MAX;
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
 #define APOGEE_MIN_THRESHOLD    5000     // Min apogee altitude needed for drogue to be deployed
 #define MAIN_DEPLOY_ALTITUDE    1000.0  // End of drogue descent (ft)
+//#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
 #define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
 #define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
@@ -196,7 +198,7 @@ bool drogueDescentExitTransition(void)
     {
       xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
       vTaskDelay(pdMS_TO_TICKS(100));
-      xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
+      xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
     }
     transDelay = sensor_get_tick_ms();
     return true;
