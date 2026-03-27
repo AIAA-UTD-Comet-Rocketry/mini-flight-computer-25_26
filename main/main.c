@@ -18,10 +18,10 @@
 #include "esp_timer.h"
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
-#define SENSOR_DELAY_MS 100
+#define SENSOR_DELAY_MS 100 // 1/100ms = 10Hz
 
 // Uncomment to run pyro bench test on boot (DO NOT fly with this enabled)
-#define PYRO_BENCH_TEST
+//#define PYRO_BENCH_TEST
 
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
@@ -65,15 +65,17 @@ void app_main(void) {
     // IMU Calibration (blocking, ~5 seconds)
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
 
-    // Ground Pressure Reference (average 50 samples for stability)
+    // Ground Pressure Reference (average samples for stability)
     float ground_pressure = 0;
     float sample;
-    for (int i = 0; i < 50; i++) {
+    int SAMPLE_NUM = 100;
+
+    for (int i = 0; i < SAMPLE_NUM; i++) {
         LPS22DF_PRESS_GetPressure(mini_fc_handle->lps22df_handle, &sample);
         ground_pressure += sample;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    ground_pressure /= 50.0f;
+    ground_pressure /= (SAMPLE_NUM * 1.0f);
     sensor_set_ground_pressure(ground_pressure);
 
     /// Flight State Machine
@@ -142,7 +144,7 @@ void app_main(void) {
     // LED
     xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
     // Pyro
-    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 0, &xPyroTaskHandle);
+    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
 
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
 
@@ -172,6 +174,7 @@ void vImuHandlerTask(void *pvParameters) {
     LSM6DSV80X_Axes_t accel_axes, gyro_axes;
     imu_calibrated_t cal_data;
 
+    int imu_print_counter = 0;
     while(1) {
         LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
         LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
@@ -182,10 +185,13 @@ void vImuHandlerTask(void *pvParameters) {
         // Update shared flight data for FSM (also populates gAccel/gGyro for SD logger)
         sensor_update_flight_data(&cal_data);
 
-        ESP_LOGI("IMU", "Accel (g): X=%.3f Y=%.3f Z=%.3f",
-                 cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
-        ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
-                 cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2]);
+        if(++imu_print_counter >= 10) {
+            ESP_LOGI("IMU", "Accel (g): X=%.3f Y=%.3f Z=%.3f",
+                     cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
+            ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
+                     cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2]);
+            imu_print_counter = 0;
+        }
         if(xQueueSend(imu_queue, (void*) &cal_data, pdMS_TO_TICKS(10)) != pdPASS) {
             ESP_LOGE(TAG, "Failed to send IMU data to queue");
         }
@@ -200,7 +206,7 @@ void vMagHandlerTask(void *pvParameters) {
         IIS2MDC_MAG_GetAxes(mag, &next_axis);
         mag_data = sensor_update_mag(next_axis);
 
-        ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
+        // ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
         if(xQueueSend(mag_queue, (void*) &mag_data, pdMS_TO_TICKS(10)) != pdPASS) {
             ESP_LOGE(TAG, "Failed to send Mag data to queue");
         }
@@ -219,6 +225,7 @@ void vFsmTask(void *pvParameters) {
 void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
     AltData_t alt_data;
+    int alt_print_counter = 0;
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
         LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
@@ -230,7 +237,10 @@ void vAltHandlerTask(void *pvParameters) {
             continue;
         }
 
-        ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", alt_data.pressure, alt_data.altitude);
+        if(++alt_print_counter >= 10) {
+            ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", alt_data.pressure, alt_data.altitude);
+            alt_print_counter = 0;
+        }
         // Encapsulate data
         if(xQueueSend(alt_queue, (void*) &alt_data, pdMS_TO_TICKS(10)) != pdPASS) {
 

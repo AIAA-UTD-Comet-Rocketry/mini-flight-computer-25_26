@@ -21,6 +21,17 @@
  * STATE_LANDED
  */
 
+ /*
+ IREC Rocket Sims Info:
+  - max accel = 482 ft/s^2 
+  - max velocity = 1167 ft/s 
+  - time to apogee = 24 seconds
+  - expected apogee: 10500ft
+  - expected burn time = 3.33 seconds
+  - drogue descent rate = 55 ft/s to 48 ft/s down
+  - main descent rate = 15ft/s
+ */
+
 #include "FlightFSM.h"
 #include "esp_log.h"
 #include <math.h>
@@ -50,6 +61,7 @@ static const char *TAG = "FSM";
 float prevAlt = 0;
 float prevVel = 0;
 uint8_t apogeeConfirmed = 0;
+uint8_t descendingSamples = 0;
 uint8_t landedSamples = 0;
 uint32_t transDelay = UINT32_MAX;
 
@@ -58,17 +70,18 @@ uint32_t transDelay = UINT32_MAX;
 #define LAUNCH_ACC_THRESH_G     1.6     // Threshold acceleration to indicate launch
 #define LAUNCH_DEBOUNCE_MS      100     // Burn for 0.1 sec before trigger
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
-#define MAX_BURN_TIME_MS        6000    // Burn state timeout to catch error
+#define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    0     // Min apogee altitude needed for drogue to be deployed
-#define MAIN_DEPLOY_ALTITUDE    1000.0  // End of drogue descent (ft)
+#define APOGEE_MIN_THRESHOLD    5000  // Min apogee altitude needed for drogue to be deployed (use 5000 for flight)
+#define MAIN_DEPLOY_ALTITUDE    1000  // End of drogue descent (ft)
 //#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
 #define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
 #define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
 #define LANDED_COOLDOWN_MS		  10000	// 10 sec
-#define MACH_LOCK_TIME_MS       2000 // ms
+#define MACH_LOCK_TIME_MS       4000 // ms - must cover transonic phase (~Mach 0.8-1.2)
+#define APOGEE_CONSEC_SAMPLES   3    // consecutive descending samples before apogee confirm
 
 
 /* Redefined Callback Implementations, Called when new state is entered */
@@ -140,18 +153,26 @@ bool burningExitTransition(void)
 bool risingExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
-  // Look for apogee
+  // Look for apogee — require consecutive descending samples to filter transonic noise
   if(uwTick >= transDelay)
   {
-    if(gAltitude < prevAlt)
+    if(gAltitude < prevAlt) // Check for negative altitude -> rocket falling
     {
-      transDelay = uwTick;
-      return true; // no longer rising
+      descendingSamples++;
+      if(descendingSamples >= APOGEE_CONSEC_SAMPLES) // Check multiple samples
+      {
+        descendingSamples = 0;
+        transDelay = uwTick;
+        return true;
+      }
+    }
+    else
+    {
+      descendingSamples = 0; // reset sample back to 0 if positive altitude
     }
 
-    // still rising, set-up next altitude comparison
     prevAlt = gAltitude;
-    transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS; // Separate comparison samples
+    transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS;
   }
   return false;
 }
@@ -166,25 +187,27 @@ bool apogeeExitTransition(void)
 	if (uwTick >= transDelay) {
 		if (gAltitude > APOGEE_MIN_THRESHOLD && currentVel <= 0 && !apogeeConfirmed)
 		{
-			// Negative velocity + cooldown period
+			// Negative velocity confirmed — start cooldown before firing
 			transDelay = uwTick + APOGEE_COOLDOWN_MS;
 			apogeeConfirmed = 1;
 		}
 		else if (apogeeConfirmed && uwTick > transDelay)
 		{
-			// Fire drogue 1 (35g CO2) and drogue 2 (45g CO2)
+			// Cooldown elapsed — fire drogues
 			if (xPyroTaskHandle != NULL)
 			{
 				xTaskNotify(xPyroTaskHandle, PYRO_APO1_BIT, eSetBits);
-        vTaskDelay(pdMS_TO_TICKS(1000)); // wait for 1 second before firing the other round
 				xTaskNotify(xPyroTaskHandle, PYRO_APO2_BIT, eSetBits);
 			}
 			prevAlt = gAltitude; // reset for descent tracking
 			return true;
 		}
-
-		prevAlt = gAltitude;
-		transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS;
+		else
+		{
+			// Not yet confirmed — keep sampling
+			prevAlt = gAltitude;
+			transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS;
+		}
 	}
 	return false;
 }
@@ -197,8 +220,7 @@ bool drogueDescentExitTransition(void)
     if (xPyroTaskHandle != NULL)
     {
       xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
+      //xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
     }
     transDelay = sensor_get_tick_ms();
     return true;
@@ -235,7 +257,7 @@ bool mainDescentExitTransition(void)
 bool landedExitTransition(void) // not re-launch prior to reboot
 {
   uint32_t uwTick = sensor_get_tick_ms();
-	uint32_t landedTime = 0; // Additional landing verification
+	static uint32_t landedTime = 0; // Additional landing verification
 
 	// Check for low acceleration
 	if (fabs(gTotalAcc - 1.0f) < 0.2f)

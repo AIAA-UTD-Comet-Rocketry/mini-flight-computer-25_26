@@ -131,7 +131,7 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     if (gTotalAcc > 0.01f) {
         gDegOffVert = acosf(az / gTotalAcc) * (180.0f / (float)M_PI);
     }
-    printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
+    //printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
 }
 
 MagData_t sensor_update_mag(IIS2MDC_Axes_t axes) {
