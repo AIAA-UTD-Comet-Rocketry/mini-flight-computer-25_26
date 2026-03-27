@@ -11,7 +11,9 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
+#include "iis2mdc.h"
 #include "lsm6dsv80x.h"
+#include "lps22df.h"
 
 #define IMU_CAL_NUM_SAMPLES     500
 #define IMU_CAL_SAMPLE_DELAY_MS 10
@@ -26,6 +28,18 @@ typedef struct {
     float accel_g[3]; // calibrated accelerometer in g
     float gyro_dps[3]; // calibrated gyroscope in deg/s
 } imu_calibrated_t;
+
+typedef struct {
+    float pressure;
+    float temp;
+    float altitude;
+} AltData_t;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} MagData_t;
 
 /**
  * Run startup calibration by collecting samples while stationary.
@@ -62,12 +76,12 @@ uint32_t sensor_get_tick_ms(void);
 void sensor_set_ground_pressure(float pressure_hpa);
 
 // Update gAltitude from current pressure reading
-void sensor_update_altitude(float pressure_hpa, float temp);
+float sensor_update_altitude(float pressure_hpa, float temp);
 
 // Update gTotalAcc, gDegOffVert, gAccel, gGyro from calibrated IMU data
 void sensor_update_flight_data(const imu_calibrated_t *imu);
 
 // Update gMag from magnetometer axes
-void sensor_update_mag(int32_t x, int32_t y, int32_t z);
+MagData_t sensor_update_mag(IIS2MDC_Axes_t axes);
 
 #endif // SENSOR_MGR_H
