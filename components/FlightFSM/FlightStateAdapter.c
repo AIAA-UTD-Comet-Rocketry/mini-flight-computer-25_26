@@ -73,7 +73,7 @@ uint32_t transDelay = UINT32_MAX;
 #define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
 #define APOGEE_MIN_THRESHOLD    5000  // Min apogee altitude needed for drogue to be deployed (use 5000 for flight)
-#define MAIN_DEPLOY_ALTITUDE    1000  // End of drogue descent (ft)
+#define MAIN_DEPLOY_ALTITUDE    1500  // End of drogue descent (ft)
 //#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
 #define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed

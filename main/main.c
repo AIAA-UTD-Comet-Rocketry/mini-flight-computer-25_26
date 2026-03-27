@@ -66,17 +66,17 @@ void app_main(void) {
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
 
     // Ground Pressure Reference (average samples for stability)
-    float ground_pressure = 0;
-    float sample;
-    int SAMPLE_NUM = 100;
+    // float ground_pressure = 0;
+    // float sample;
+    // int SAMPLE_NUM = 100;
 
-    for (int i = 0; i < SAMPLE_NUM; i++) {
-        LPS22DF_PRESS_GetPressure(mini_fc_handle->lps22df_handle, &sample);
-        ground_pressure += sample;
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    ground_pressure /= (SAMPLE_NUM * 1.0f);
-    sensor_set_ground_pressure(ground_pressure);
+    // for (int i = 0; i < SAMPLE_NUM; i++) {
+    //     LPS22DF_PRESS_GetPressure(mini_fc_handle->lps22df_handle, &sample);
+    //     ground_pressure += sample;
+    //     vTaskDelay(pdMS_TO_TICKS(10));
+    // }
+    // ground_pressure /= (SAMPLE_NUM * 1.0f);
+    // sensor_set_ground_pressure(ground_pressure);
 
     /// Flight State Machine
     initFlightState(&flight_state);

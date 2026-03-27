@@ -134,6 +134,7 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     //printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
 }
 
+// TODO: Calibrate mag sensor using NXP lib
 MagData_t sensor_update_mag(IIS2MDC_Axes_t axes) {
     MagData_t mag_data = {
         .x = (float)axes.x,

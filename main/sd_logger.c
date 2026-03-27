@@ -85,7 +85,7 @@ esp_err_t sd_logger_init(void) {
         "acc_x,acc_y,acc_z,"
         "mag_x,mag_y,mag_z,"
         "pressure_hpa,altitude_ft,temp_f,"
-        "pyro1,pyro2,pyro3,pyro4\n");
+        "drogue1,drogue2,main1,main2\n");
     fflush(log_file);
     fsync(fileno(log_file));
 
