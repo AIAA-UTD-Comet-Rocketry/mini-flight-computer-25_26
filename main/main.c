@@ -19,6 +19,9 @@
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
 
+// Uncomment to run pyro bench test on boot (DO NOT fly with this enabled)
+#define PYRO_BENCH_TEST
+
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
 static FlightState flight_state;
@@ -140,20 +143,22 @@ void app_main(void) {
     // drive led_status with pattern
     LED_setPattern(led_status, pattern_burst);
 
-    // IIS2MDC_Axes_t next_axis;
-    // for(;;){
-    //     IIS2MDC_MAG_GetAxes(mini_fc_handle->iis2mdc_handle, &next_axis);
-    //     ESP_LOGI(TAG, "Mag X: %d, Mag Y: %d, Mag Z: %d", next_axis.x, next_axis.y, next_axis.z);
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
-    // }
+#ifdef PYRO_BENCH_TEST
+    // Bench test: fire each pyro channel one at a time with 3s gaps
+    // Monitor GPIO 6,7,8,9 with multimeter/LED — DO NOT connect real charges
+    ESP_LOGW(TAG, "=== PYRO BENCH TEST MODE ===");
+    ESP_LOGW(TAG, "Firing channels in 5 seconds...");
+    vTaskDelay(pdMS_TO_TICKS(5000));
 
-    /*
-    The calibrated hard and soft iron can be represented with an ofset followed by a matrix
-    to translate by rotation and scale.
-
-    m = [c0, c1][m1-o1]
-        [c2, c3][m2-o2]
-    */
+    const char *channel_names[] = {"APO1 (35g CO2)", "APO2 (45g CO2)", "MAIN1 (TD2)", "MAIN2"};
+    for (int ch = 0; ch < 4; ch++) {
+        ESP_LOGW(TAG, "Firing channel %d: %s", ch, channel_names[ch]);
+        xTaskNotify(xPyroTaskHandle, (1 << ch), eSetBits);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+    ESP_LOGW(TAG, "=== PYRO BENCH TEST COMPLETE ===");
+    ESP_LOGW(TAG, "Pyro status bitmask: 0x%02X", gPyroStatus);
+#endif
 }
 
 void vImuHandlerTask(void *pvParameters) {

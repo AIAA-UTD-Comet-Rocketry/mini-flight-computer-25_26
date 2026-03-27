@@ -60,7 +60,7 @@ uint32_t transDelay = UINT32_MAX;
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
 #define MAX_BURN_TIME_MS        6000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    5000     // Min apogee altitude needed for drogue to be deployed
+#define APOGEE_MIN_THRESHOLD    0     // Min apogee altitude needed for drogue to be deployed
 #define MAIN_DEPLOY_ALTITUDE    1000.0  // End of drogue descent (ft)
 //#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
@@ -72,15 +72,15 @@ uint32_t transDelay = UINT32_MAX;
 
 
 /* Redefined Callback Implementations, Called when new state is entered */
-void enterIdle(void)           { ESP_LOGI(TAG, "Entered IDLE at %lu ms", sensor_get_tick_ms()); }
-void enterArmed(void)          { ESP_LOGI(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms()); }
-void enterDisarm(void)         { ESP_LOGI(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms()); }
-void enterBurning(void)        { ESP_LOGI(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms()); }
-void enterRising(void)         { ESP_LOGI(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms()); }
-void enterApogee(void)         { ESP_LOGI(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms()); }
-void enterDrogueDescent(void)  { ESP_LOGI(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterMainDescent(void)    { ESP_LOGI(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterLanded(void)         { ESP_LOGI(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms()); }
+void enterIdle(void)           { ESP_LOGW(TAG, "Entered IDLE at %lu ms", sensor_get_tick_ms()); }
+void enterArmed(void)          { ESP_LOGW(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms()); }
+void enterDisarm(void)         { ESP_LOGW(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms()); }
+void enterBurning(void)        { ESP_LOGW(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms()); }
+void enterRising(void)         { ESP_LOGW(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms()); }
+void enterApogee(void)         { ESP_LOGW(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms()); }
+void enterDrogueDescent(void)  { ESP_LOGW(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms()); }
+void enterMainDescent(void)    { ESP_LOGW(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms()); }
+void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms()); }
 
 /*
  * Redefined Transition Functions, true moves to next.
