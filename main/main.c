@@ -252,13 +252,12 @@ void vAltHandlerTask(void *pvParameters) {
 
 void vSdLoggerTask(void *pvParameters) {
     SensorDataPacket_t packet;
-    int write_counter = 0;
     while (1) {
         xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY);
         xQueueReceive(alt_queue, &packet.alt, portMAX_DELAY);
         xQueueReceive(mag_queue, &packet.mag, portMAX_DELAY);
         if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-            write_log(packet, &write_counter);
+            write_packet(packet);
             xSemaphoreGive(xSemaphore);
         }
     }

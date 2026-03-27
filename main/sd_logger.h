@@ -11,6 +11,7 @@ typedef struct {
 } SensorDataPacket_t;
 
 esp_err_t sd_logger_init(void);
-esp_err_t write_log(SensorDataPacket_t packet, int* write_counter);
+esp_err_t write_packet(SensorDataPacket_t packet);
+esp_err_t sd_write_log(const void* data, size_t len);
 
 #endif // SD_LOGGER_H
