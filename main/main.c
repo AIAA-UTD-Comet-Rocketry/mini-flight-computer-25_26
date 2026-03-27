@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
+#define SENSOR_DELAY_MS 100
 
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
@@ -27,7 +28,12 @@ static FlightState flight_state;
 void vImuHandlerTask(void *pvParameters);
 void vMagHandlerTask(void *pvParameters);
 void vAltHandlerTask(void *pvParameters);
+void vSdLoggerTask(void *pvParameters);
 void vFsmTask(void *pvParameters);
+
+static QueueHandle_t imu_queue = NULL, alt_queue = NULL, mag_queue = NULL;
+
+SemaphoreHandle_t xSemaphore;
 
 TaskHandle_t xPyroTaskHandle = NULL;
 
@@ -53,14 +59,10 @@ void app_main(void) {
     //ESP_ERROR_CHECK(bsp_init(&bsp_init_cfg));
     bsp_init(&mini_fc_handle, &bsp_init_cfg);
 
-    ///////////////////////////////
-    /// IMU Calibration (blocking, ~5 seconds)
-    ////////////////////////////////
+    // IMU Calibration (blocking, ~5 seconds)
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
 
-    ///////////////////////////////
-    /// Ground Pressure Reference (average 50 samples for stability)
-    ////////////////////////////////
+    // Ground Pressure Reference (average 50 samples for stability)
     float ground_pressure = 0;
     float sample;
     for (int i = 0; i < 50; i++) {
@@ -71,15 +73,19 @@ void app_main(void) {
     ground_pressure /= 50.0f;
     sensor_set_ground_pressure(ground_pressure);
 
-    ///////////////////////////////
     /// Flight State Machine
-    ////////////////////////////////
     initFlightState(&flight_state);
 
-    ///////////////////////////////
     /// SD Card Logger
-    ////////////////////////////////
     sd_logger_init(); // non-fatal if SD card is absent
+    
+    // Queue inits
+    imu_queue = xQueueCreate(10, sizeof(imu_calibrated_t));
+    alt_queue = xQueueCreate(10, sizeof(AltData_t));
+    mag_queue = xQueueCreate(10, sizeof(MagData_t));
+
+    // Semaphore init
+    xSemaphore = xSemaphoreCreateMutex();
 
     ///////////////////////////////
     /// Task Creation
@@ -94,7 +100,7 @@ void app_main(void) {
                                "SD Logger",
                                4096,
                                NULL,
-                               1,
+                               2,
                                &xSdLoggerHandle);
         CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
     }
@@ -130,30 +136,15 @@ void app_main(void) {
                            2,  // higher priority than sensor tasks
                            &xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
-
-    // Task Scheduler is automatically called as part of the ESP-IDF core functionality
-
+    // LED
     xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
+    // Pyro
     xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 0, &xPyroTaskHandle);
+
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
 
     // drive led_status with pattern
     LED_setPattern(led_status, pattern_burst);
-
-    // IIS2MDC_Axes_t next_axis;
-    // for(;;){
-    //     IIS2MDC_MAG_GetAxes(mini_fc_handle->iis2mdc_handle, &next_axis);
-    //     ESP_LOGI(TAG, "Mag X: %d, Mag Y: %d, Mag Z: %d", next_axis.x, next_axis.y, next_axis.z);
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
-    // }
-
-    /*
-    The calibrated hard and soft iron can be represented with an ofset followed by a matrix
-    to translate by rotation and scale.
-
-    m = [c0, c1][m1-o1]
-        [c2, c3][m2-o2]
-    */
 }
 
 void vImuHandlerTask(void *pvParameters) {
@@ -175,18 +166,25 @@ void vImuHandlerTask(void *pvParameters) {
                  cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
         ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
                  cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2]);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        if(xQueueSend(imu_queue, (void*) &cal_data, pdMS_TO_TICKS(10)) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to send IMU data to queue");
+        }
+        vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
 }
 void vMagHandlerTask(void *pvParameters) {
     IIS2MDC_Object_t* mag = (IIS2MDC_Object_t*)pvParameters;
     IIS2MDC_Axes_t next_axis;
+    MagData_t mag_data;
     while(1) {
         IIS2MDC_MAG_GetAxes(mag, &next_axis);
-        sensor_update_mag(next_axis.x, next_axis.y, next_axis.z);
+        mag_data = sensor_update_mag(next_axis);
 
         ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        if(xQueueSend(mag_queue, (void*) &mag_data, pdMS_TO_TICKS(10)) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to send Mag data to queue");
+        }
+        vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
 }
 
@@ -200,19 +198,38 @@ void vFsmTask(void *pvParameters) {
 
 void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
-    float_t pressure, temp;
+    AltData_t alt_data;
     while(1) {
-        LPS22DF_PRESS_GetPressure(alt, &pressure);
-        LPS22DF_TEMP_GetTemperature(alt, &temp);
-        if (pressure || temp != LPS22DF_ERROR) {
-            sensor_update_altitude(pressure, temp);
+        LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
+        LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
+        if (alt_data.pressure || alt_data.temp != LPS22DF_ERROR) {
+            alt_data.altitude = sensor_update_altitude(alt_data.pressure, alt_data.temp);
         }
         else {
             ESP_LOGE("PRESS", "Failed to obtain Altitude data");
             continue;
         }
 
-        ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", pressure, gAltitude);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", alt_data.pressure, alt_data.altitude);
+        // Encapsulate data
+        if(xQueueSend(alt_queue, (void*) &alt_data, pdMS_TO_TICKS(10)) != pdPASS) {
+
+        }
+        vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
+    }
+}
+
+
+void vSdLoggerTask(void *pvParameters) {
+    SensorDataPacket_t packet;
+    int write_counter = 0;
+    while (1) {
+        xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY);
+        xQueueReceive(alt_queue, &packet.alt, portMAX_DELAY);
+        xQueueReceive(mag_queue, &packet.mag, portMAX_DELAY);
+        if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+            write_log(packet, &write_counter);
+            xSemaphoreGive(xSemaphore);
+        }
     }
 }

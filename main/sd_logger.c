@@ -3,7 +3,6 @@
 #include <unistd.h>
 #include <dirent.h>
 #include "sd_logger.h"
-#include "sensor_mgr.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "esp_timer.h"
@@ -95,44 +94,37 @@ esp_err_t sd_logger_init(void) {
     return ESP_OK;
 }
 
-void vSdLoggerTask(void *pvParameters) {
-    (void)pvParameters;
-    char line[256];
-    int len;
-    int flush_counter = 0;
+esp_err_t write_log(SensorDataPacket_t packet, int* write_counter) {
+    char line[256]; int len;
+    if (log_file == NULL) return ESP_FAIL;
 
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(SD_LOG_PERIOD_MS));
+    float timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
 
-        if (log_file == NULL) continue;
+    len = snprintf(line, 256,
+        "%.3f,"
+        "%.3f,%.3f,%.3f,"
+        "%.3f,%.3f,%.3f,"
+        "%.0f,%.0f,%.0f,"
+        "%.4f,%.2f,%.1f,"
+        "%c,%c,%c,%c\n",
+        timestamp_s,
+        packet.imu.accel_g[0], packet.imu.accel_g[1], packet.imu.accel_g[2],
+        packet.imu.gyro_dps[0], packet.imu.gyro_dps[1], packet.imu.gyro_dps[2],
+        packet.mag.x, packet.mag.y, packet.mag.z,
+        packet.alt.pressure, packet.alt.altitude, packet.alt.temp,
+        (gPyroStatus & (1 << 0)) ? 'Y' : 'N',
+        (gPyroStatus & (1 << 1)) ? 'Y' : 'N',
+        (gPyroStatus & (1 << 2)) ? 'Y' : 'N',
+        (gPyroStatus & (1 << 3)) ? 'Y' : 'N');
 
-        float timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
-
-        len = snprintf(line, sizeof(line),
-            "%.3f,"
-            "%.3f,%.3f,%.3f,"
-            "%.3f,%.3f,%.3f,"
-            "%.0f,%.0f,%.0f,"
-            "%.4f,%.2f,%.1f,"
-            "%c,%c,%c,%c\n",
-            timestamp_s,
-            gGyro[0], gGyro[1], gGyro[2],
-            gAccel[0], gAccel[1], gAccel[2],
-            gMag[0], gMag[1], gMag[2],
-            gPressure, gAltitude, gTemperature_F,
-            (gPyroStatus & (1 << 0)) ? 'Y' : 'N',
-            (gPyroStatus & (1 << 1)) ? 'Y' : 'N',
-            (gPyroStatus & (1 << 2)) ? 'Y' : 'N',
-            (gPyroStatus & (1 << 3)) ? 'Y' : 'N');
-
-        if (len > 0) {
-            fwrite(line, 1, len, log_file);
-        }
-
-        if (++flush_counter >= 10) {
-            fflush(log_file);
-            fsync(fileno(log_file));
-            flush_counter = 0;
-        }
+    if (len > 0) {
+        fwrite(line, 1, len, log_file);
     }
+
+    if ((*write_counter)++ >= 10) {
+        fflush(log_file);
+        fsync(fileno(log_file));
+        *write_counter = 0;
+    }
+    return ESP_OK;
 }

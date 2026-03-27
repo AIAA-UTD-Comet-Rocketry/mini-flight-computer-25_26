@@ -97,7 +97,7 @@ void sensor_set_ground_pressure(float pressure_hpa) {
     ESP_LOGI(TAG, "Ground pressure set: %.2f hPa", SEALEVELPRESSURE_HPA);
 }
 
-void sensor_update_altitude(float pressure_hpa, float temp) {
+float sensor_update_altitude(float pressure_hpa, float temp) {
     const float R = 287.05f;   // Specific gas constant for dry air (J/(kg·K))
     const float g = 9.80665f;  // Gravity (m/s²)
 
@@ -111,6 +111,7 @@ void sensor_update_altitude(float pressure_hpa, float temp) {
     // Store pressure and temperature for SD logging
     gPressure = pressure_hpa;
     gTemperature_F = temp * 9.0f / 5.0f + 32.0f;
+    return gAltitude;
 }
 
 void sensor_update_flight_data(const imu_calibrated_t *imu) {
@@ -133,8 +134,11 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
 }
 
-void sensor_update_mag(int32_t x, int32_t y, int32_t z) {
-    gMag[0] = (float)x;
-    gMag[1] = (float)y;
-    gMag[2] = (float)z;
+MagData_t sensor_update_mag(IIS2MDC_Axes_t axes) {
+    MagData_t mag_data = {
+        .x = (float)axes.x,
+        .y = (float)axes.y,
+        .z = (float)axes.z
+    };
+    return mag_data;
 }
