@@ -23,7 +23,7 @@ static const char *file_header =
         "acc_x,acc_y,acc_z,"
         "mag_x,mag_y,mag_z,"
         "pressure_hpa,altitude_ft,temp_f,"
-        "pyro1,pyro2,pyro3,pyro4\n";
+        "drogue1,drogue2,main1,main2\n";
 
 static FILE *log_file = NULL;
 
