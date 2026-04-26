@@ -12,7 +12,7 @@
 
 #define PYRO_MAX_ATTEMPTS 2 // total allowed pyro drives
 #define PYRO_DRIVE_TIME  50 // ms to drive pyro channel for
-#define PYRO_COOL_TIME   50 // ms to wait between attempted drives
+#define PYRO_COOL_TIME   500 // ms to wait between attempted drives
 
 #define patternMax     160 // 125ms per sample so 20 seconds of to cycle through
 #define patternBytes    20 // Each bit is a time sample

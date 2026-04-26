@@ -21,7 +21,7 @@ static const char *file_header =
         "timestamp_s,"
         "gyro_x,gyro_y,gyro_z,"
         "acc_x,acc_y,acc_z,"
-        "mag_x,mag_y,mag_z,"
+        // "mag_x,mag_y,mag_z,"
         "pressure_hpa,altitude_ft,temp_f,"
         "drogue1,drogue2,main1,main2\n";
 
@@ -145,13 +145,13 @@ esp_err_t write_packet(SensorDataPacket_t packet) {
         "%.3f,"
         "%.3f,%.3f,%.3f,"
         "%.3f,%.3f,%.3f,"
-        "%.0f,%.0f,%.0f,"
+//        "%.0f,%.0f,%.0f,"
         "%.4f,%.2f,%.1f,"
         "%c,%c,%c,%c\n",
         timestamp_s,
         packet.imu.accel_g[0], packet.imu.accel_g[1], packet.imu.accel_g[2],
         packet.imu.gyro_dps[0], packet.imu.gyro_dps[1], packet.imu.gyro_dps[2],
-        packet.mag.x, packet.mag.y, packet.mag.z,
+//        packet.mag.x, packet.mag.y, packet.mag.z,
         packet.alt.pressure, packet.alt.altitude, packet.alt.temp,
         (gPyroStatus & (1 << 0)) ? 'Y' : 'N',
         (gPyroStatus & (1 << 1)) ? 'Y' : 'N',

@@ -49,9 +49,7 @@ TaskHandle_t xPyroTaskHandle = NULL;
 void app_main(void) {
     (void)TAG; // Stop compile warnings, unused debug variables are not a concern
 
-    ///////////////////////////////
-    /// Configuration
-    ////////////////////////////////
+    // Handle config
     static board_handle_t mini_fc_handle;
 
     bsp_config_t bsp_init_cfg = {
@@ -92,9 +90,7 @@ void app_main(void) {
     // Semaphore init
     xSemaphore = xSemaphoreCreateMutex();
 
-    ///////////////////////////////
-    /// Task Creation
-    ////////////////////////////////
+    // RTOS Task creation
     BaseType_t task_ret;
     TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle;
 
@@ -117,14 +113,14 @@ void app_main(void) {
                            1, 
                            &xImuTaskHandle);
     CHECK_TASK_CREATION(task_ret, "IMU task failed to create!");
-    // Magnetometer
-    task_ret = xTaskCreate(vMagHandlerTask,
-                           "Magnetometer Data Collection",
-                           MIN_STACK_SIZE,
-                           (void*) mini_fc_handle->iis2mdc_handle,
-                           1,
-                           &xMagTaskHandle);
-    CHECK_TASK_CREATION(task_ret, "Magnetometer task failed to create!");
+    // Magnetometer (not using currently)
+    // task_ret = xTaskCreate(vMagHandlerTask,
+    //                        "Magnetometer Data Collection",
+    //                        MIN_STACK_SIZE,
+    //                        (void*) mini_fc_handle->iis2mdc_handle,
+    //                        1,
+    //                        &xMagTaskHandle);
+    // CHECK_TASK_CREATION(task_ret, "Magnetometer task failed to create!");
     // Pressure
     task_ret = xTaskCreate(vAltHandlerTask,
                            "Absolute Pressure Data Collection",
@@ -255,7 +251,7 @@ void vSdLoggerTask(void *pvParameters) {
     while (1) {
         xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY);
         xQueueReceive(alt_queue, &packet.alt, portMAX_DELAY);
-        xQueueReceive(mag_queue, &packet.mag, portMAX_DELAY);
+//        xQueueReceive(mag_queue, &packet.mag, portMAX_DELAY);
         if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
             write_packet(packet);
             xSemaphoreGive(xSemaphore);
