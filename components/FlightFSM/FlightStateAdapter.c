@@ -42,8 +42,8 @@
 extern TaskHandle_t xPyroTaskHandle;
 
 /* Pyro channel bit masks (mirrors pyro_index_t in BSP.h) */
-#define PYRO_APO1_BIT   (1 << 0)  // apo1_channel - 35g CO2
-#define PYRO_APO2_BIT   (1 << 1)  // apo2_channel - 45g CO2
+#define PYRO_DRG1_BIT   (1 << 0)  // drogue1_channel - 35g CO2
+#define PYRO_DRG2_BIT   (1 << 1)  // drogue2_channel - 45g CO2
 #define PYRO_MAIN1_BIT  (1 << 2)  // main1_channel - TD2 ejection
 #define PYRO_MAIN2_BIT  (1 << 3)  // main2_channel - TD2 ejection
 
@@ -193,11 +193,11 @@ bool apogeeExitTransition(void)
 		}
 		else if (apogeeConfirmed && uwTick > transDelay)
 		{
-			// Cooldown elapsed — fire drogues
+			// Cooldown elapsed — fire drogue 1 and drogue 2 sequentially
 			if (xPyroTaskHandle != NULL)
 			{
-				xTaskNotify(xPyroTaskHandle, PYRO_APO1_BIT, eSetBits);
-				xTaskNotify(xPyroTaskHandle, PYRO_APO2_BIT, eSetBits);
+				xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
+				xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
 			}
 			prevAlt = gAltitude; // reset for descent tracking
 			return true;
