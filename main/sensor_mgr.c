@@ -7,9 +7,6 @@
 
 static const char *TAG = "SensorMgr";
 
-// Expected gravity vector when board is flat, Z-up (in mg)
-#define GRAVITY_MG 1000.0f
-
 // Shared flight data globals
 float gTotalAcc = 0;
 float gAltitude = 0;
@@ -30,21 +27,16 @@ esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
 
     cal->is_calibrated = false;
 
-    float accel_sum[3] = {0};
     float gyro_sum[3] = {0};
     LSM6DSV80X_Axes_t accel_axes, gyro_axes;
 
-    ESP_LOGI(TAG, "Starting IMU calibration (%d samples, ~%d seconds)...",
+    ESP_LOGI(TAG, "Starting gyro bias calibration (%d samples, ~%d seconds)...",
              IMU_CAL_NUM_SAMPLES, (IMU_CAL_NUM_SAMPLES * IMU_CAL_SAMPLE_DELAY_MS) / 1000);
     ESP_LOGI(TAG, "Keep the board stationary!");
 
     for (int i = 0; i < IMU_CAL_NUM_SAMPLES; i++) {
-        LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
+        LSM6DSV80X_ACC_GetAxes(imu, &accel_axes); // drain register; not used here
         LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
-
-        accel_sum[0] += (float)accel_axes.x;
-        accel_sum[1] += (float)accel_axes.y;
-        accel_sum[2] += (float)accel_axes.z;
 
         gyro_sum[0] += (float)gyro_axes.x;
         gyro_sum[1] += (float)gyro_axes.y;
@@ -53,21 +45,12 @@ esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
         vTaskDelay(pdMS_TO_TICKS(IMU_CAL_SAMPLE_DELAY_MS));
     }
 
-    // Accel bias: average minus expected gravity on Z
-    cal->accel_bias_mg[0] = accel_sum[0] / IMU_CAL_NUM_SAMPLES;
-    cal->accel_bias_mg[1] = accel_sum[1] / IMU_CAL_NUM_SAMPLES;
-    cal->accel_bias_mg[2] = accel_sum[2] / IMU_CAL_NUM_SAMPLES - GRAVITY_MG;
-
-    // Gyro bias: average (should be near zero when stationary)
     cal->gyro_bias_mdps[0] = gyro_sum[0] / IMU_CAL_NUM_SAMPLES;
     cal->gyro_bias_mdps[1] = gyro_sum[1] / IMU_CAL_NUM_SAMPLES;
     cal->gyro_bias_mdps[2] = gyro_sum[2] / IMU_CAL_NUM_SAMPLES;
 
     cal->is_calibrated = true;
 
-    ESP_LOGI(TAG, "Calibration complete.");
-    ESP_LOGI(TAG, "Accel bias (mg):  X=%.2f  Y=%.2f  Z=%.2f",
-             cal->accel_bias_mg[0], cal->accel_bias_mg[1], cal->accel_bias_mg[2]);
     ESP_LOGI(TAG, "Gyro bias (mdps): X=%.2f  Y=%.2f  Z=%.2f",
              cal->gyro_bias_mdps[0], cal->gyro_bias_mdps[1], cal->gyro_bias_mdps[2]);
 
@@ -130,12 +113,14 @@ void imu_apply_calibration(const imu_cal_t *cal,
                            const LSM6DSV80X_Axes_t *raw_accel,
                            const LSM6DSV80X_Axes_t *raw_gyro,
                            imu_calibrated_t *out) {
-    // Subtract bias (mg) then convert mg -> g
-    out->accel_g[0] = ((float)raw_accel->x - cal->accel_bias_mg[0]) / 1000.0f;
-    out->accel_g[1] = ((float)raw_accel->y - cal->accel_bias_mg[1]) / 1000.0f;
-    out->accel_g[2] = ((float)raw_accel->z - cal->accel_bias_mg[2]) / 1000.0f;
+    // Accel: convert mg -> g (no bias; EKF absorbs offset during cal phase)
+    out->accel_g[0] = (float)raw_accel->x / 1000.0f;
+    out->accel_g[1] = (float)raw_accel->y / 1000.0f;
+    out->accel_g[2] = (float)raw_accel->z / 1000.0f;
 
-    // Subtract bias (mdps) then convert mdps -> deg/s
+    //Function to call when calibrating: UpdateRefMeasurementMagn(accel_data, magn_data, R);
+
+    // Gyro: subtract bias (mdps) then convert mdps -> deg/s
     out->gyro_dps[0] = ((float)raw_gyro->x - cal->gyro_bias_mdps[0]) / 1000.0f;
     out->gyro_dps[1] = ((float)raw_gyro->y - cal->gyro_bias_mdps[1]) / 1000.0f;
     out->gyro_dps[2] = ((float)raw_gyro->z - cal->gyro_bias_mdps[2]) / 1000.0f;
@@ -179,12 +164,7 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     gGyro[2] = imu->gyro_dps[2];
 
     gTotalAcc = sqrtf(ax * ax + ay * ay + az * az);
-
-    // Degrees off vertical: angle between accel vector and Z-axis
-    if (gTotalAcc > 0.01f) {
-        gDegOffVert = acosf(az / gTotalAcc) * (180.0f / (float)M_PI);
-    }
-    //printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
+    // gDegOffVert is now driven by the EKF quaternion in the IMU task.
 }
 
 // Apply in sensor_update_mag()
@@ -213,29 +193,26 @@ MagData_t sensor_update_mag(IIS2MDC_Axes_t axes, const mag_cal_t *cal)
     return out;
 }
 
-esp_err_t cal_save_nvs(const imu_cal_t *imu_cal, const mag_cal_t *mag_cal)
+esp_err_t mag_cal_save_nvs(const mag_cal_t *mag_cal)
 {
     nvs_handle_t h;
     esp_err_t ret = nvs_open(CAL_NVS_NAMESPACE, NVS_READWRITE, &h);
     if (ret != ESP_OK) return ret;
 
-    nvs_set_blob(h, "imu_cal", imu_cal, sizeof(imu_cal_t));
-    nvs_set_blob(h, "mag_cal", mag_cal, sizeof(mag_cal_t));
-    nvs_commit(h);
+    ret = nvs_set_blob(h, "mag_cal", mag_cal, sizeof(mag_cal_t));
+    if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
-    return ESP_OK;
+    return ret;
 }
 
-esp_err_t cal_load_nvs(imu_cal_t *imu_cal, mag_cal_t *mag_cal)
+esp_err_t mag_cal_load_nvs(mag_cal_t *mag_cal)
 {
     nvs_handle_t h;
     esp_err_t ret = nvs_open(CAL_NVS_NAMESPACE, NVS_READONLY, &h);
     if (ret != ESP_OK) return ret;
 
-    size_t sz = sizeof(imu_cal_t);
-    nvs_get_blob(h, "imu_cal", imu_cal, &sz);
-    sz = sizeof(mag_cal_t);
-    nvs_get_blob(h, "mag_cal", mag_cal, &sz);
+    size_t sz = sizeof(mag_cal_t);
+    ret = nvs_get_blob(h, "mag_cal", mag_cal, &sz);
     nvs_close(h);
-    return ESP_OK;
+    return ret;
 }

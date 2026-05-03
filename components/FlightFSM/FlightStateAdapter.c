@@ -74,17 +74,17 @@ uint32_t transDelay = UINT32_MAX;
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
 #define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    1000  // Min apogee altitude needed for drogue to be deployed
-#define MAIN_DEPLOY_ALTITUDE    1500  // End of drogue descent (ft)
-//#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
+#define APOGEE_MIN_THRESHOLD    1000    // Min apogee altitude needed for drogue to be deployed
+#define MAIN_DEPLOY_ALTITUDE    1500    // End of drogue descent (ft)
+//#define MAIN_DEPLOY_ACC_THRESH_G   10 // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
-#define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
-#define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
+#define LANDED_ALT_THRESHOLD	  3.0		  // Change in altitude (ft) to be considered landed
+#define LANDED_SAMPLES_REQ		  1		    // 1 consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
-#define DROGUE_SEQ_DELAY_MS     500     // delay between DRG1 and DRG2 firing
-#define LANDED_COOLDOWN_MS		  10000	// 10 sec
-#define MACH_LOCK_TIME_MS       4000 // ms - must cover transonic phase (~Mach 0.8-1.2)
-#define APOGEE_CONSEC_SAMPLES   3    // consecutive descending samples before apogee confirm
+#define DROGUE_SEQ_DELAY_MS     1000    // Delay between DRG1 and DRG2 firing
+#define LANDED_COOLDOWN_MS		  10000	  // 10 sec
+#define MACH_LOCK_TIME_MS       4000    // ms - must cover transonic phase (~Mach 0.8-1.2)
+#define APOGEE_CONSEC_SAMPLES   3       // consecutive descending samples before apogee confirm
 
 
 /* Redefined Callback Implementations, Called when new state is entered */

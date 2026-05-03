@@ -15,28 +15,41 @@
 #include "sd_logger.h"
 #include "sensor_mgr.h"
 #include "FlightFSM.h"
+#include "attitude_ekf.h"
 #include "esp_timer.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
-#define SENSOR_DELAY_MS 100 // 1/100ms = 10Hz
+#define SENSOR_DELAY_MS 10 // 1/10ms = 100Hz
+#define LOGGING_DELAY_MS 100 // ms
+
+// EKF on-pad calibration phase: 5 s at 100 Hz
+#define EKF_CAL_CYCLES 500
+// IMU task queues to SD logger at 10 Hz (every 10th cycle of 100 Hz IMU loop)
+#define IMU_QUEUE_DECIMATE 10
 
 // Uncomment to run pyro bench test on boot (DO NOT fly with this enabled)
 //#define PYRO_BENCH_TEST
 
+// Uncomment, flash, perform figure-8 rotation, observe save log, halt.
+// Recomment and re-flash for normal flight.
+// #define DO_MAG_CAL
+
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
+static mag_cal_t mag_cal;
 static FlightState flight_state;
 
-// Tasks
+static void init_nvs_flash_memory(void);
+
+// RTOS Tasks
 void vImuHandlerTask(void *pvParameters);
-void vMagHandlerTask(void *pvParameters);
 void vAltHandlerTask(void *pvParameters);
 void vSdLoggerTask(void *pvParameters);
 void vFsmTask(void *pvParameters);
-int sensors_init(board_handle_t mini_fc_handle);
 
-static QueueHandle_t imu_queue = NULL, alt_queue = NULL, mag_queue = NULL;
+static QueueHandle_t imu_queue = NULL, alt_queue = NULL;
 
 SemaphoreHandle_t xSemaphore;
 
@@ -59,34 +72,53 @@ void app_main(void) {
         .Bsp_Delay = vTaskDelay
     };
 
-    //ESP_ERROR_CHECK(bsp_init(&bsp_init_cfg));
-    bsp_init(&mini_fc_handle, &bsp_init_cfg);
+    if (bsp_init(&mini_fc_handle, &bsp_init_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "BSP init failed. Stopping program!");
+        while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
 
     // Initialize NVS storage
     init_nvs_flash_memory();
 
-    // Initialize sensors
-    if (sensors_init(mini_fc_handle) == -1) {
-        ESP_LOGI(TAG, "Sensor(s) failed to initialize. Stopping program!");
-        while(1) {
+#ifdef DO_MAG_CAL
+    // Bench-only mode: rotate the board through all orientations during sampling.
+    // Result is persisted to NVS and reused by every subsequent flight boot.
+    ESP_LOGW(TAG, "=== MAG CALIBRATION MODE ===");
+    if (mag_calibrate(mini_fc_handle->iis2mdc_handle, &mag_cal) == ESP_OK) {
+        if (mag_cal_save_nvs(&mag_cal) == ESP_OK) {
+            ESP_LOGW(TAG, "Mag cal saved to NVS. Recomment DO_MAG_CAL and re-flash.");
+        } else {
+            ESP_LOGE(TAG, "Mag cal NVS save failed.");
         }
+    } else {
+        ESP_LOGE(TAG, "Mag cal collection failed.");
+    }
+    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+#endif
+
+    // Load mag cal from NVS (persisted from a previous bench session).
+    if (mag_cal_load_nvs(&mag_cal) != ESP_OK || !mag_cal.is_calibrated) {
+        ESP_LOGW(TAG, "Mag cal not in NVS. Flight will run with raw mag; EKF will absorb slowly.");
+        memset(&mag_cal, 0, sizeof(mag_cal));
+        // identity soft-iron so sensor_update_mag passthrough is reasonable
+        mag_cal.soft_iron[0][0] = 1.0f;
+        mag_cal.soft_iron[1][1] = 1.0f;
+        mag_cal.soft_iron[2][2] = 1.0f;
+    } else {
+        ESP_LOGI(TAG, "Mag cal loaded from NVS.");
     }
 
-    // IMU Calibration (blocking, ~5 seconds)
+    // Gyro bias calibration (blocking, ~5 seconds)
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
 
-    // Ground Pressure Reference (average samples for stability)
-    // float ground_pressure = 0;
-    // float sample;
-    // int SAMPLE_NUM = 100;
-
-    // for (int i = 0; i < SAMPLE_NUM; i++) {
-    //     LPS22DF_PRESS_GetPressure(mini_fc_handle->lps22df_handle, &sample);
-    //     ground_pressure += sample;
-    //     vTaskDelay(pdMS_TO_TICKS(10));
-    // }
-    // ground_pressure /= (SAMPLE_NUM * 1.0f);
-    // sensor_set_ground_pressure(ground_pressure);
+    // Bring up the EKF and seed gyro bias (mdps -> dps)
+    attitude_ekf_init();
+    float gyro_seed_dps[3] = {
+        imu_cal.gyro_bias_mdps[0] / 1000.0f,
+        imu_cal.gyro_bias_mdps[1] / 1000.0f,
+        imu_cal.gyro_bias_mdps[2] / 1000.0f,
+    };
+    attitude_ekf_seed_gyro_bias_dps(gyro_seed_dps);
 
     /// Flight State Machine
     initFlightState(&flight_state);
@@ -97,14 +129,13 @@ void app_main(void) {
     // Queue inits
     imu_queue = xQueueCreate(10, sizeof(imu_calibrated_t));
     alt_queue = xQueueCreate(10, sizeof(AltData_t));
-    mag_queue = xQueueCreate(10, sizeof(MagData_t));
 
     // Semaphore init
     xSemaphore = xSemaphoreCreateMutex();
 
     // RTOS Task creation
     BaseType_t task_ret;
-    TaskHandle_t xImuTaskHandle, xMagTaskHandle, xAltTaskHandle;
+    TaskHandle_t xImuTaskHandle, xAltTaskHandle;
 
     // SD Logger
     {
@@ -117,28 +148,22 @@ void app_main(void) {
                                &xSdLoggerHandle);
         CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
     }
-    // IMU
-    task_ret = xTaskCreate(vImuHandlerTask, 
-                           "IMU Data Collection", 
-                           MIN_STACK_SIZE, 
-                           (void*) mini_fc_handle->lsm6dsv80x_handle, 
-                           1, 
+    // IMU + EKF + Mag (all sensor fusion in one 100 Hz task).
+    // EKF allocates several dspm::Mat scratch matrices per Process()/Update*()
+    // call; 8 KB gives comfortable headroom over the ~3 KB peak observed.
+    task_ret = xTaskCreate(vImuHandlerTask,
+                           "IMU+EKF",
+                           8192,
+                           (void*) mini_fc_handle,
+                           2,
                            &xImuTaskHandle);
     CHECK_TASK_CREATION(task_ret, "IMU task failed to create!");
-    // Magnetometer (not using currently)
-    // task_ret = xTaskCreate(vMagHandlerTask,
-    //                        "Magnetometer Data Collection",
-    //                        MIN_STACK_SIZE,
-    //                        (void*) mini_fc_handle->iis2mdc_handle,
-    //                        1,
-    //                        &xMagTaskHandle);
-    // CHECK_TASK_CREATION(task_ret, "Magnetometer task failed to create!");
     // Pressure
     task_ret = xTaskCreate(vAltHandlerTask,
                            "Absolute Pressure Data Collection",
                            MIN_STACK_SIZE,
                            (void*) mini_fc_handle->lps22df_handle,
-                           1,
+                           2,
                            &xAltTaskHandle);
     // Flight State Machine
     TaskHandle_t xFsmTaskHandle;
@@ -176,37 +201,7 @@ void app_main(void) {
         ESP_LOGW(TAG, "Pyro status bitmask: 0x%02X", gPyroStatus);
     #endif
     }
-
-int sensors_init(board_handle_t mini_fc_handle) {
-    uint8_t err = 0;
-
-    if (LSM6DSV80X_Init(mini_fc_handle->lsm6dsv80x_handle) == LSM6DSV80X_OK) {
-        ESP_LOGI(TAG, "LSM6DSV80X Init OK");
-    } else {
-        ESP_LOGE(TAG, "LSM6DSV80X Init ERROR");
-        err = 1;
-    }
-
-    if (LPS22DF_Init(mini_fc_handle->lps22df_handle) == LPS22DF_OK) {
-        ESP_LOGI(TAG, "LPS22DF Init OK");
-    } else {
-        ESP_LOGE(TAG, "LPS22DF Init ERROR");
-        err = 1;
-    }
-
-    if (IIS2MDC_Init(mini_fc_handle->iis2mdc_handle) == IIS2MDC_OK) {
-        ESP_LOGI(TAG, "IIS2MDC Init OK");
-    } else {
-        ESP_LOGE(TAG, "IIS2MDC Init ERROR");
-        err = 1;
-    }
-    if (err) {
-        return -1;
-    }
-
-    return 0;
-}
-
+  
 /**
  * @brief Initialize NVS flash memory
  */
@@ -223,46 +218,76 @@ static void init_nvs_flash_memory(void)
 }
 
 void vImuHandlerTask(void *pvParameters) {
-    LSM6DSV80X_Object_t* imu = (LSM6DSV80X_Object_t*)pvParameters;
-    LSM6DSV80X_Axes_t accel_axes, gyro_axes;
-    imu_calibrated_t cal_data;
+    board_handle_t board = (board_handle_t)pvParameters;
+    LSM6DSV80X_Object_t *imu = board->lsm6dsv80x_handle;
+    IIS2MDC_Object_t   *mag = board->iis2mdc_handle;
 
-    int imu_print_counter = 0;
-    while(1) {
+    LSM6DSV80X_Axes_t accel_axes, gyro_axes;
+    IIS2MDC_Axes_t mag_axes;
+    imu_calibrated_t cal_data;
+    MagData_t mag_data;
+
+    int print_counter = 0;
+    int decim_counter = 0;
+    int cycle = 0;
+    int64_t prev_us = esp_timer_get_time();
+
+    ESP_LOGW(TAG, "EKF calibrating: hold board still for ~5 s...");
+
+    while (1) {
         LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
         LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
+        IIS2MDC_MAG_GetAxes(mag, &mag_axes);
 
-        // Apply calibration and convert units
         imu_apply_calibration(&imu_cal, &accel_axes, &gyro_axes, &cal_data);
-
-        // Update shared flight data for FSM (also populates gAccel/gGyro for SD logger)
+        mag_data = sensor_update_mag(mag_axes, &mag_cal);
         sensor_update_flight_data(&cal_data);
 
-        if(++imu_print_counter >= 10) {
-            ESP_LOGI("IMU", "Accel (g): X=%.3f Y=%.3f Z=%.3f",
-                     cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2]);
-            ESP_LOGI("IMU", "Gyro (dps): X=%.3f Y=%.3f Z=%.3f",
-                     cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2]);
-            imu_print_counter = 0;
-        }
-        if(xQueueSend(imu_queue, (void*) &cal_data, pdMS_TO_TICKS(10)) != pdPASS) {
-            ESP_LOGE(TAG, "Failed to send IMU data to queue");
-        }
-        vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
-    }
-}
-void vMagHandlerTask(void *pvParameters) {
-    IIS2MDC_Object_t* mag = (IIS2MDC_Object_t*)pvParameters;
-    IIS2MDC_Axes_t next_axis;
-    MagData_t mag_data;
-    while(1) {
-        IIS2MDC_MAG_GetAxes(mag, &next_axis);
-        mag_data = sensor_update_mag(next_axis);
+        int64_t now_us = esp_timer_get_time();
+        float dt_s = (float)(now_us - prev_us) * 1e-6f;
+        prev_us = now_us;
+        if (dt_s <= 0.0f || dt_s > 0.1f) dt_s = SENSOR_DELAY_MS * 0.001f; // fallback on jitter
 
-        // ESP_LOGI("MAG", "Mag X: %ld, Mag Y: %ld, Mag Z: %ld", next_axis.x, next_axis.y, next_axis.z);
-        if(xQueueSend(mag_queue, (void*) &mag_data, pdMS_TO_TICKS(10)) != pdPASS) {
-            ESP_LOGE(TAG, "Failed to send Mag data to queue");
+        const float mag_in[3] = { mag_data.x, mag_data.y, mag_data.z };
+
+        if (cycle < EKF_CAL_CYCLES) {
+            attitude_ekf_calibrate_step(cal_data.accel_g, cal_data.gyro_dps, mag_in, dt_s);
+        } else {
+            attitude_ekf_update(cal_data.accel_g, cal_data.gyro_dps, mag_in, dt_s);
+            gDegOffVert = attitude_ekf_get_tilt_deg();
         }
+
+        if (cycle == EKF_CAL_CYCLES) {
+            float bias_dps[3];
+            attitude_ekf_get_gyro_bias_dps(bias_dps);
+            ESP_LOGW(TAG, "EKF cal done. Gyro bias (dps): X=%.3f Y=%.3f Z=%.3f",
+                     bias_dps[0], bias_dps[1], bias_dps[2]);
+        }
+        cycle++;
+
+        if (++print_counter >= 100) { // 1 Hz at 100 Hz task rate
+            float q[4]; attitude_ekf_get_quaternion(q);
+            // ESP_LOGI("IMU", "Raw  accel(mg)=[%ld,%ld,%ld]  gyro(mdps)=[%ld,%ld,%ld]  mag(raw)=[%ld,%ld,%ld]",
+            //          (long)accel_axes.x, (long)accel_axes.y, (long)accel_axes.z,
+            //          (long)gyro_axes.x,  (long)gyro_axes.y,  (long)gyro_axes.z,
+            //          (long)mag_axes.x,   (long)mag_axes.y,   (long)mag_axes.z);
+            ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
+                     cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
+                     cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
+                     mag_data.x, mag_data.y, mag_data.z);
+            ESP_LOGI("IMU", "EKF  tilt=%.1f deg  q=[%.3f,%.3f,%.3f,%.3f]",
+                     gDegOffVert, q[0], q[1], q[2], q[3]);
+            print_counter = 0;
+        }
+
+        // Decimate to 10 Hz before pushing to SD logger queue
+        if (++decim_counter >= IMU_QUEUE_DECIMATE) {
+            decim_counter = 0;
+            if (xQueueSend(imu_queue, (void*) &cal_data, 0) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to send IMU data to queue");
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
 }
@@ -279,6 +304,8 @@ void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
     AltData_t alt_data;
     int alt_print_counter = 0;
+    int decim_counter = 0;
+
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
         LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
@@ -290,28 +317,39 @@ void vAltHandlerTask(void *pvParameters) {
             continue;
         }
 
-        if(++alt_print_counter >= 10) {
+        if(++alt_print_counter >= 100) {
             ESP_LOGI("PRESS", "Pressure (hpa): %f, Altitude (ft): %f", alt_data.pressure, alt_data.altitude);
             alt_print_counter = 0;
         }
         // Encapsulate data
-        if(xQueueSend(alt_queue, (void*) &alt_data, pdMS_TO_TICKS(10)) != pdPASS) {
-
+        // Decimate to 10 Hz before pushing to SD logger queue
+        if (++decim_counter >= IMU_QUEUE_DECIMATE) {
+            decim_counter = 0;
+            if (xQueueSend(alt_queue, (void*) &alt_data, pdMS_TO_TICKS(10)) != pdPASS) {
+                ESP_LOGE(TAG, "Failed to send Baro data to queue");
+            }
         }
+    
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
 }
 
-
 void vSdLoggerTask(void *pvParameters) {
     SensorDataPacket_t packet;
     while (1) {
-        xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY);
-        xQueueReceive(alt_queue, &packet.alt, portMAX_DELAY);
-//        xQueueReceive(mag_queue, &packet.mag, portMAX_DELAY);
-        if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-            write_packet(packet);
-            xSemaphoreGive(xSemaphore);
+        // Block task until packet is sent from IMU task
+        if (xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY) == pdTRUE) {
+            // Check for latest ALT packet, if no then move on with no delay to reduce timing mismatches
+            xQueueReceive(alt_queue, &packet.alt, 0);
+
+            // Use a binary semaphore to lock the write SD card when calling task frequently
+            if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+                if (write_packet(packet) == ESP_OK) {
+                    ESP_LOGI(TAG, "Wrote packet to SD.");
+                }
+                xSemaphoreGive(xSemaphore);
+            }
         }
+        //vTaskDelay(pdMS_TO_TICKS(LOGGING_DELAY_MS)); //add delay for every 100ms
     }
 }
