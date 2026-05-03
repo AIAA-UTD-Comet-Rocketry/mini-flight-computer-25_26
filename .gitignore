@@ -10,4 +10,4 @@ build/
 .cache/
 .devcontainer/
 # VSCode configs
-./vscode
+.vscode/
