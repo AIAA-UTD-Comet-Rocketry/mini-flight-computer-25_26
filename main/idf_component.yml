@@ -5,3 +5,4 @@ dependencies:
     path: ${IDF_PATH}/examples/system/console/advanced/components/cmd_nvs
   cmd_wifi:
     path: ${IDF_PATH}/examples/system/console/advanced/components/cmd_wifi
+  espressif/esp-dsp: ^1.8.1

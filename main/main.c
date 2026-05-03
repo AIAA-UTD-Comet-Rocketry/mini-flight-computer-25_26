@@ -16,6 +16,7 @@
 #include "sensor_mgr.h"
 #include "FlightFSM.h"
 #include "esp_timer.h"
+#include "nvs.h"
 
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
 #define SENSOR_DELAY_MS 100 // 1/100ms = 10Hz
@@ -33,6 +34,7 @@ void vMagHandlerTask(void *pvParameters);
 void vAltHandlerTask(void *pvParameters);
 void vSdLoggerTask(void *pvParameters);
 void vFsmTask(void *pvParameters);
+int sensors_init(board_handle_t mini_fc_handle);
 
 static QueueHandle_t imu_queue = NULL, alt_queue = NULL, mag_queue = NULL;
 
@@ -59,6 +61,16 @@ void app_main(void) {
 
     //ESP_ERROR_CHECK(bsp_init(&bsp_init_cfg));
     bsp_init(&mini_fc_handle, &bsp_init_cfg);
+
+    // Initialize NVS storage
+    init_nvs_flash_memory();
+
+    // Initialize sensors
+    if (sensors_init(mini_fc_handle) == -1) {
+        ESP_LOGI(TAG, "Sensor(s) failed to initialize. Stopping program!");
+        while(1) {
+        }
+    }
 
     // IMU Calibration (blocking, ~5 seconds)
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
@@ -147,22 +159,67 @@ void app_main(void) {
     // drive led_status with pattern
     LED_setPattern(led_status, pattern_burst);
 
-#ifdef PYRO_BENCH_TEST
-    // Bench test: fire each pyro channel one at a time with 3s gaps
-    // Monitor GPIO 6,7,8,9 with multimeter/LED — DO NOT connect real charges
-    ESP_LOGW(TAG, "=== PYRO BENCH TEST MODE ===");
-    ESP_LOGW(TAG, "Firing channels in 5 seconds...");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    #ifdef PYRO_BENCH_TEST
+        // Bench test: fire each pyro channel one at a time with 3s gaps
+        // Monitor GPIO 6,7,8,9 with multimeter/LED — DO NOT connect real charges
+        ESP_LOGW(TAG, "=== PYRO BENCH TEST MODE ===");
+        ESP_LOGW(TAG, "Firing channels in 5 seconds...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
 
-    const char *channel_names[] = {"APO1 (35g CO2)", "APO2 (45g CO2)", "MAIN1 (TD2)", "MAIN2"};
-    for (int ch = 0; ch < 4; ch++) {
-        ESP_LOGW(TAG, "Firing channel %d: %s", ch, channel_names[ch]);
-        xTaskNotify(xPyroTaskHandle, (1 << ch), eSetBits);
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        const char *channel_names[] = {"APO1 (35g CO2)", "APO2 (45g CO2)", "MAIN1 (TD2)", "MAIN2"};
+        for (int ch = 0; ch < 4; ch++) {
+            ESP_LOGW(TAG, "Firing channel %d: %s", ch, channel_names[ch]);
+            xTaskNotify(xPyroTaskHandle, (1 << ch), eSetBits);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+        ESP_LOGW(TAG, "=== PYRO BENCH TEST COMPLETE ===");
+        ESP_LOGW(TAG, "Pyro status bitmask: 0x%02X", gPyroStatus);
+    #endif
     }
-    ESP_LOGW(TAG, "=== PYRO BENCH TEST COMPLETE ===");
-    ESP_LOGW(TAG, "Pyro status bitmask: 0x%02X", gPyroStatus);
-#endif
+
+int sensors_init(board_handle_t mini_fc_handle) {
+    uint8_t err = 0;
+
+    if (LSM6DSV80X_Init(mini_fc_handle->lsm6dsv80x_handle) == LSM6DSV80X_OK) {
+        ESP_LOGI(TAG, "LSM6DSV80X Init OK");
+    } else {
+        ESP_LOGE(TAG, "LSM6DSV80X Init ERROR");
+        err = 1;
+    }
+
+    if (LPS22DF_Init(mini_fc_handle->lps22df_handle) == LPS22DF_OK) {
+        ESP_LOGI(TAG, "LPS22DF Init OK");
+    } else {
+        ESP_LOGE(TAG, "LPS22DF Init ERROR");
+        err = 1;
+    }
+
+    if (IIS2MDC_Init(mini_fc_handle->iis2mdc_handle) == IIS2MDC_OK) {
+        ESP_LOGI(TAG, "IIS2MDC Init OK");
+    } else {
+        ESP_LOGE(TAG, "IIS2MDC Init ERROR");
+        err = 1;
+    }
+    if (err) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Initialize NVS flash memory
+ */
+static void init_nvs_flash_memory(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated and needs to be erased
+        // Retry nvs_flash_init
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( err );
 }
 
 void vImuHandlerTask(void *pvParameters) {

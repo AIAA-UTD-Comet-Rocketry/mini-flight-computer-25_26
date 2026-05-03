@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "nvs.h"
 
 static const char *TAG = "SensorMgr";
 
@@ -73,6 +74,58 @@ esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
     return ESP_OK;
 }
 
+esp_err_t mag_calibrate(IIS2MDC_Object_t *mag, mag_cal_t *cal)
+{
+    float min[3] = { 1e9f,  1e9f,  1e9f};
+    float max[3] = {-1e9f, -1e9f, -1e9f};
+    IIS2MDC_Axes_t axes;
+
+    ESP_LOGI(TAG, "Mag calibration: rotate board through all orientations");
+    ESP_LOGI(TAG, "Collecting %d samples over ~%d seconds...",
+             MAG_CAL_NUM_SAMPLES,
+             (MAG_CAL_NUM_SAMPLES * MAG_CAL_SAMPLE_DELAY_MS) / 1000);
+
+    for (int i = 0; i < MAG_CAL_NUM_SAMPLES; i++) {
+        IIS2MDC_MAG_GetAxes(mag, &axes);
+        float v[3] = {(float)axes.x, (float)axes.y, (float)axes.z};
+
+        for (int j = 0; j < 3; j++) {
+            if (v[j] < min[j]) min[j] = v[j];
+            if (v[j] > max[j]) max[j] = v[j];
+        }
+        vTaskDelay(pdMS_TO_TICKS(MAG_CAL_SAMPLE_DELAY_MS));
+    }
+
+    // Hard-iron: midpoint of min/max sphere
+    for (int j = 0; j < 3; j++) {
+        cal->hard_iron[j] = (max[j] + min[j]) / 2.0f;
+    }
+
+    // Soft-iron: scale each axis to unit sphere
+    // (diagonal-only correction — sufficient without full ellipsoid fit)
+    float avg_delta = 0;
+    float delta[3];
+    for (int j = 0; j < 3; j++) {
+        delta[j] = (max[j] - min[j]) / 2.0f;
+        avg_delta += delta[j];
+    }
+    avg_delta /= 3.0f;
+
+    memset(cal->soft_iron, 0, sizeof(cal->soft_iron));
+    for (int j = 0; j < 3; j++) {
+        cal->soft_iron[j][j] = (delta[j] > 0.01f) ? (avg_delta / delta[j]) : 1.0f;
+    }
+
+    cal->is_calibrated = true;
+
+    ESP_LOGI(TAG, "Hard-iron (mGauss): X=%.1f Y=%.1f Z=%.1f",
+             cal->hard_iron[0], cal->hard_iron[1], cal->hard_iron[2]);
+    ESP_LOGI(TAG, "Soft-iron scale:    X=%.4f Y=%.4f Z=%.4f",
+             cal->soft_iron[0][0], cal->soft_iron[1][1], cal->soft_iron[2][2]);
+
+    return ESP_OK;
+}
+
 void imu_apply_calibration(const imu_cal_t *cal,
                            const LSM6DSV80X_Axes_t *raw_accel,
                            const LSM6DSV80X_Axes_t *raw_gyro,
@@ -134,12 +187,55 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     //printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
 }
 
-// TODO: Calibrate mag sensor using NXP lib
-MagData_t sensor_update_mag(IIS2MDC_Axes_t axes) {
-    MagData_t mag_data = {
-        .x = (float)axes.x,
-        .y = (float)axes.y,
-        .z = (float)axes.z
-    };
-    return mag_data;
+// Apply in sensor_update_mag()
+MagData_t sensor_update_mag(IIS2MDC_Axes_t axes, const mag_cal_t *cal)
+{
+    float v[3] = {(float)axes.x, (float)axes.y, (float)axes.z};
+    MagData_t out = {0};
+
+    if (cal && cal->is_calibrated) {
+        float corrected[3];
+        for (int i = 0; i < 3; i++) {
+            float biased = v[i] - cal->hard_iron[i];
+            corrected[i] = 0;
+            for (int j = 0; j < 3; j++) {
+                corrected[i] += cal->soft_iron[i][j] * biased;
+            }
+        }
+        out.x = corrected[0];
+        out.y = corrected[1];
+        out.z = corrected[2];
+    } else {
+        out.x = v[0]; out.y = v[1]; out.z = v[2];
+    }
+
+    gMag[0] = out.x; gMag[1] = out.y; gMag[2] = out.z;
+    return out;
+}
+
+esp_err_t cal_save_nvs(const imu_cal_t *imu_cal, const mag_cal_t *mag_cal)
+{
+    nvs_handle_t h;
+    esp_err_t ret = nvs_open(CAL_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (ret != ESP_OK) return ret;
+
+    nvs_set_blob(h, "imu_cal", imu_cal, sizeof(imu_cal_t));
+    nvs_set_blob(h, "mag_cal", mag_cal, sizeof(mag_cal_t));
+    nvs_commit(h);
+    nvs_close(h);
+    return ESP_OK;
+}
+
+esp_err_t cal_load_nvs(imu_cal_t *imu_cal, mag_cal_t *mag_cal)
+{
+    nvs_handle_t h;
+    esp_err_t ret = nvs_open(CAL_NVS_NAMESPACE, NVS_READONLY, &h);
+    if (ret != ESP_OK) return ret;
+
+    size_t sz = sizeof(imu_cal_t);
+    nvs_get_blob(h, "imu_cal", imu_cal, &sz);
+    sz = sizeof(mag_cal_t);
+    nvs_get_blob(h, "mag_cal", mag_cal, &sz);
+    nvs_close(h);
+    return ESP_OK;
 }

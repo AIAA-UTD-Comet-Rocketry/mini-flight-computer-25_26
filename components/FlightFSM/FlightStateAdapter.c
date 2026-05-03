@@ -60,7 +60,9 @@ static const char *TAG = "FSM";
 /* Private Variables */
 float prevAlt = 0;
 float prevVel = 0;
+float altOffset = 0;
 uint8_t apogeeConfirmed = 0;
+uint8_t drg1Fired = 0;
 uint8_t descendingSamples = 0;
 uint8_t landedSamples = 0;
 uint32_t transDelay = UINT32_MAX;
@@ -72,13 +74,14 @@ uint32_t transDelay = UINT32_MAX;
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
 #define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    5000  // Min apogee altitude needed for drogue to be deployed (use 5000 for flight)
+#define APOGEE_MIN_THRESHOLD    1000  // Min apogee altitude needed for drogue to be deployed
 #define MAIN_DEPLOY_ALTITUDE    1500  // End of drogue descent (ft)
 //#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
 #define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
 #define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
+#define DROGUE_SEQ_DELAY_MS     500     // delay between DRG1 and DRG2 firing
 #define LANDED_COOLDOWN_MS		  10000	// 10 sec
 #define MACH_LOCK_TIME_MS       4000 // ms - must cover transonic phase (~Mach 0.8-1.2)
 #define APOGEE_CONSEC_SAMPLES   3    // consecutive descending samples before apogee confirm
@@ -110,6 +113,8 @@ bool idleExitTransition(void)
 bool armedExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
+  altOffset = gAltitude;
+
   // Look for launch
   if(gTotalAcc > LAUNCH_ACC_THRESH_G)
   {
@@ -185,20 +190,26 @@ bool apogeeExitTransition(void)
 
 	// Apogee detection logic
 	if (uwTick >= transDelay) {
-		if (gAltitude > APOGEE_MIN_THRESHOLD && currentVel <= 0 && !apogeeConfirmed)
+		if (currentVel <= 0 && !apogeeConfirmed)
 		{
 			// Negative velocity confirmed — start cooldown before firing
 			transDelay = uwTick + APOGEE_COOLDOWN_MS;
 			apogeeConfirmed = 1;
 		}
-		else if (apogeeConfirmed && uwTick > transDelay)
+		else if (apogeeConfirmed && !drg1Fired)
 		{
-			// Cooldown elapsed — fire drogue 1 and drogue 2 sequentially
+			// Cooldown elapsed — fire drogue 1, then arm delay for drogue 2
 			if (xPyroTaskHandle != NULL)
-			{
 				xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
+			drg1Fired = 1;
+			transDelay = uwTick + DROGUE_SEQ_DELAY_MS;
+		}
+		else if (drg1Fired)
+		{
+			// Sequence delay elapsed — fire drogue 2
+			if (xPyroTaskHandle != NULL)
 				xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
-			}
+        
 			prevAlt = gAltitude; // reset for descent tracking
 			return true;
 		}
@@ -214,7 +225,7 @@ bool apogeeExitTransition(void)
 
 bool drogueDescentExitTransition(void)
 {
-  if(gAltitude < MAIN_DEPLOY_ALTITUDE)
+  if(gAltitude < (MAIN_DEPLOY_ALTITUDE + altOffset))
   {
     // Fire main charge (TD2 ejection)
     if (xPyroTaskHandle != NULL)

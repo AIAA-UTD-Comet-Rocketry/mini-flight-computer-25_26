@@ -16,13 +16,23 @@
 #include "lps22df.h"
 
 #define IMU_CAL_NUM_SAMPLES     500
+#define MAG_CAL_NUM_SAMPLES     100
 #define IMU_CAL_SAMPLE_DELAY_MS 10
+#define MAG_CAL_SAMPLE_DELAY_MS 10
+
+#define CAL_NVS_NAMESPACE "sensor_cal"
 
 typedef struct {
     float accel_bias_mg[3]; // accelerometer bias in mg
     float gyro_bias_mdps[3]; // gyroscope bias in mdps
     bool is_calibrated;
 } imu_cal_t;
+
+typedef struct {
+    float hard_iron[3];      // X[0..2]: offset to subtract
+    float soft_iron[3][3];   // 3x3 correction matrix
+    bool is_calibrated;
+} mag_cal_t;
 
 typedef struct {
     float accel_g[3]; // calibrated accelerometer in g
