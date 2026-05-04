@@ -104,6 +104,11 @@ void app_main(void) {
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 #endif
 
+    // CAN telemetry up early so subsequent steps can fire status bits and events.
+    can_telemetry_start(*mini_fc_handle->can_node_hdl);
+    can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
+    //xTaskCreate(can_tx_task, "can_tx_task", 2048, NULL, 5, NULL);
+
     // Load mag cal from NVS (persisted from a previous bench session).
     load_mag_cal();
 
@@ -130,10 +135,6 @@ void app_main(void) {
     /// Flight State Machine
     initFlightState(&flight_state);
     registerFlightState(&flight_state);  // bind for getCurrentFlightState()
-
-    // CAN telemetry up early so subsequent steps can fire status bits and events.
-    can_telemetry_start(*mini_fc_handle->can_node_hdl);
-    can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
 
     /// SD Card Logger
     if (sd_logger_init() != ESP_OK) {
@@ -295,10 +296,10 @@ void vImuHandlerTask(void *pvParameters) {
         cycle++;
 
         if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
-            ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
-                     cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
-                     cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
-                     cal_data.mag_axes[0], cal_data.mag_axes[1], cal_data.mag_axes[2]);
+            // ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
+            //          cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
+            //          cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
+            //          cal_data.mag_axes[0], cal_data.mag_axes[1], cal_data.mag_axes[2]);
             printData();
         }
 
@@ -352,7 +353,7 @@ void vAltHandlerTask(void *pvParameters) {
         alt_data.temp = alt_data.temp * 1.8 + 32.0;
 
         if(++alt_print_counter >= 100) {
-            ESP_LOGI("PRESS", "Pressure (hpa): %.2f, Altitude (ft): %.2f Temp (F): %.2f", alt_data.pressure, alt_data.altitude, alt_data.temp);
+            //ESP_LOGI("PRESS", "Pressure (hpa): %.2f, Altitude (ft): %.2f Temp (F): %.2f", alt_data.pressure, alt_data.altitude, alt_data.temp);
             alt_print_counter = 0;
         }
         // Encapsulate data
@@ -401,18 +402,48 @@ void vSdLoggerTask(void *pvParameters) {
     }
 }
 
+// CAN TX task for testing CAN bus transceiver
+// Sends a counter frame every second on ID 0x100
+static void can_tx_task(void *arg) {
+    uint32_t counter = 0;
+
+    while (1) {
+        twai_message_t tx_msg = {};
+        tx_msg.identifier = 0x100;
+        tx_msg.data_length_code = 4;
+        tx_msg.data[0] = (counter >> 24) & 0xFF;
+        tx_msg.data[1] = (counter >> 16) & 0xFF;
+        tx_msg.data[2] = (counter >>  8) & 0xFF;
+        tx_msg.data[3] = (counter      ) & 0xFF;
+
+        //esp_err_t err = twai_transmit(&tx_msg, pdMS_TO_TICKS(1000));
+        // if (err == ESP_OK) {
+        //     ESP_LOGI("CAN-TX", "Sent ID=0x%03X counter=%lu", (unsigned)tx_msg.identifier, (unsigned long)counter);
+        // } else {
+        //     ESP_LOGW("CAN-TX", "TX failed: %s", esp_err_to_name(err));
+        // }
+
+        counter++;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 void printData() {
     attitude_t att;
     attitude_ekf_get_attitude(&att);
 
     ESP_LOGI("AHRS",
-    "\nYaw:   %d deg"
-    "\nPitch: %d deg"
-    "\nRoll:  %d deg"
-    "\nTilt:  %d deg",
+    "\n\tYaw:   %d deg"
+    "\n\tPitch: %d deg"
+    "\n\tRoll:  %d deg"
+    "\n\tTilt:  %d deg",
     (int)att.yaw_deg,
     (int)att.pitch_deg,
     (int)att.roll_deg,
     (int)att.tilt_deg);
+    
+    ESP_LOGI("IMU", "Acceleration: X: %.1f, Y: %.1f, Z: %.1f", gAccel[0], gAccel[1], gAccel[2]);
+    ESP_LOGI("IMU", "Total Acceleration: %.1f g", gTotalAcc);
+    ESP_LOGI("IMU", "Vertical velocity: %.1f", gVerticalVelocity_fps);
             
 }

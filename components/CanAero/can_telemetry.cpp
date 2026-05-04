@@ -89,17 +89,12 @@ static void can_tlm_task(void *pv) {
     ESP_LOGI(TAG, "Telemetry task started (node %d)", CAN_TLM_NODE_ID);
 
     while (1) {
-        ESP_LOGI(TAG, "test0"); 
         State fsm = getCurrentFlightState();
-        ESP_LOGI(TAG, "fsm: %s", fsm);
+
         // Either 10 Hz when launched or 1 Hz at ground
-        // TickType_t period = fsm_in_flight(fsm) ? pdMS_TO_TICKS(100)   // 10 Hz
-        //                                        : pdMS_TO_TICKS(1000); // 1 Hz
-        ESP_LOGI(TAG, "test1");                                       
+        TickType_t period = fsm_in_flight(fsm) ? pdMS_TO_TICKS(100) : pdMS_TO_TICKS(1000);                                    
         emit_status_set();
-        ESP_LOGI(TAG, "test2");
-        //vTaskDelay(period);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(period);
     }
 }
 

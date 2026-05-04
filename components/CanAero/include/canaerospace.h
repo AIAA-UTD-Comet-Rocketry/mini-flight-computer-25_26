@@ -79,6 +79,12 @@ bool canas_parse(const twai_frame_t *frame, canas_msg_t *out);
 void canas_tx_init(canas_tx_ctx_t *ctx, twai_node_handle_t node_hdl, uint8_t node_id);
 
 /*
+ * Register the CANaerospace TX-done callback and initialize the TX frame pool.
+ * Call this before twai_node_enable() so the driver can accept the callback.
+ */
+esp_err_t canas_tx_register_callbacks(twai_node_handle_t node_hdl);
+
+/*
  * Per-DTC TX helpers. Each builds one CANaerospace frame, populates the
  * 4-byte header (node_id, dtc, svc=0, msg_counter++), encodes the payload
  * big-endian per spec, and submits via twai_node_transmit with a 10ms timeout.
@@ -90,7 +96,9 @@ esp_err_t canas_tx_short (canas_tx_ctx_t *ctx, uint16_t msg_id, int16_t  v);
 esp_err_t canas_tx_uchar (canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t  v);
 esp_err_t canas_tx_bchar (canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t  bits);
 esp_err_t canas_tx_uchar2(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t  a, uint8_t b);
+esp_err_t canas_tx_uchar4(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t  a, uint8_t b, uint8_t c, uint8_t d);
 
 #ifdef __cplusplus
 }
 #endif // CANAEROSPACE_H
+
