@@ -5,6 +5,9 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include <math.h>
+#include <limits.h>
 
 #include "FlightFSM.h"
 #include "attitude_ekf.h"
@@ -40,16 +43,32 @@ static inline bool fsm_armed(State s) {
     return s != STATE_IDLE && s != STATE_DISARM;
 }
 
+static inline int16_t clamp_i16(int32_t v) {
+    if (v > INT16_MAX) return INT16_MAX;
+    if (v < INT16_MIN) return INT16_MIN;
+    return (int16_t)v;
+}
+
+static void build_packet(can_tlm_packet_t *pkt, const attitude_t *att, State fsm, uint8_t flags) {
+    pkt->time_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    pkt->altitude_ft = clamp_i16((int32_t)lroundf(gAltitude));
+    pkt->vert_vel_fps_x10 = clamp_i16((int32_t)lroundf(gVerticalVelocity_fps * 10.0f));
+    pkt->accel_x_mg = clamp_i16((int32_t)lroundf(gAccel[0] * 1000.0f));
+    pkt->accel_y_mg = clamp_i16((int32_t)lroundf(gAccel[1] * 1000.0f));
+    pkt->accel_z_mg = clamp_i16((int32_t)lroundf(gAccel[2] * 1000.0f));
+    pkt->pitch_deg = clamp_i16((int32_t)lroundf(att->pitch_deg));
+    pkt->roll_deg  = clamp_i16((int32_t)lroundf(att->roll_deg));
+    pkt->yaw_deg   = clamp_i16((int32_t)lroundf(att->yaw_deg));
+    pkt->fsm_state = (uint8_t)fsm;
+    pkt->status_flags = flags;
+    pkt->pyro_status = gPyroStatus;
+    pkt->reserved = 0;
+}
+
 // Single emit guarded by the TX mutex so events and the periodic loop don't
 // scramble each other's msg_counter or interleave at the driver layer.
-static esp_err_t locked_tx_float(uint16_t id, float v) {
-    return canas_tx_float(&g_tx_ctx, id, v);
-}
-static esp_err_t locked_tx_uchar(uint16_t id, uint8_t v) {
-    return canas_tx_uchar(&g_tx_ctx, id, v);
-}
-static esp_err_t locked_tx_bchar(uint16_t id, uint8_t v) {
-    return canas_tx_bchar(&g_tx_ctx, id, v);
+static esp_err_t locked_tx_uchar4(uint16_t id, uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+    return canas_tx_uchar4(&g_tx_ctx, id, a, b, c, d);
 }
 
 static void emit_status_set(void) {
@@ -58,18 +77,6 @@ static void emit_status_set(void) {
     attitude_t att;
     attitude_ekf_get_attitude(&att);
 
-    // Float telemetry
-    locked_tx_float(CAN_TLM_ID_ALTITUDE,  gAltitude);
-    locked_tx_float(CAN_TLM_ID_ACCEL_X,   gAccel[0]);
-    locked_tx_float(CAN_TLM_ID_ACCEL_Y,   gAccel[1]);
-    locked_tx_float(CAN_TLM_ID_ACCEL_Z,   gAccel[2]);
-    locked_tx_float(CAN_TLM_ID_TOTAL_ACC, gTotalAcc);
-    locked_tx_float(CAN_TLM_ID_VERT_VEL,  gVerticalVelocity_fps);
-    locked_tx_float(CAN_TLM_ID_PITCH,     att.pitch_deg);
-    locked_tx_float(CAN_TLM_ID_ROLL,      att.roll_deg);
-    locked_tx_float(CAN_TLM_ID_YAW,       att.yaw_deg);
-
-    // Discrete telemetry — assemble status flags from latched bits + live FSM
     State fsm = getCurrentFlightState();
     uint8_t flags = g_status_flags;
     if (sd_logger_is_active()) flags |=  CAN_TLM_FLAG_SD_LOGGING;
@@ -77,9 +84,15 @@ static void emit_status_set(void) {
     if (fsm_armed(fsm))        flags |=  CAN_TLM_FLAG_ARMED;
     else                       flags &= ~CAN_TLM_FLAG_ARMED;
 
-    locked_tx_uchar(CAN_TLM_ID_FSM_STATE,   (uint8_t)fsm);
-    locked_tx_bchar(CAN_TLM_ID_STATUS_FLAGS, flags);
-    locked_tx_bchar(CAN_TLM_ID_PYRO_STATUS,  gPyroStatus);
+    can_tlm_packet_t pkt;
+    build_packet(&pkt, &att, fsm, flags);
+
+    const uint8_t *bytes = (const uint8_t *)&pkt;
+    for (int i = 0; i < CAN_TLM_PACKET_CHUNKS; ++i) {
+        uint16_t msg_id = CAN_TLM_ID_PACKET_BASE + i;
+        const uint8_t *b = &bytes[i * CAN_TLM_PACKET_CHUNK_BYTES];
+        locked_tx_uchar4(msg_id, b[0], b[1], b[2], b[3]);
+    }
 
     xSemaphoreGive(g_tx_mutex);
 }
@@ -92,7 +105,7 @@ static void can_tlm_task(void *pv) {
         State fsm = getCurrentFlightState();
 
         // Either 10 Hz when launched or 1 Hz at ground
-        TickType_t period = fsm_in_flight(fsm) ? pdMS_TO_TICKS(100) : pdMS_TO_TICKS(1000);                                    
+        TickType_t period = fsm_in_flight(fsm) ? pdMS_TO_TICKS(100) : pdMS_TO_TICKS(1000);
         emit_status_set();
         vTaskDelay(period);
     }

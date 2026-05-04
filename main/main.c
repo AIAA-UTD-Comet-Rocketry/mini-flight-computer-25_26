@@ -57,7 +57,7 @@ void vFsmTask(void *pvParameters);
 
 static QueueHandle_t imu_queue = NULL, alt_queue = NULL, sensor_queue = NULL;
 SemaphoreHandle_t xSemaphore;
-TaskHandle_t xPyroTaskHandle = NULL;
+TaskHandle_t xPyroTaskHandle = NULL, xLEDTaskHandle = NULL;
 
 // Macros
 #define CHECK_TASK_CREATION(ret, err_msg) \
@@ -191,7 +191,7 @@ void app_main(void) {
                            &xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
     // LED
-    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
+    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
     // Pyro
     xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
 

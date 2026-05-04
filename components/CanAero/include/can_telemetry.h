@@ -52,6 +52,34 @@ typedef enum {
 // Default flight computer node ID (1 = primary FC).
 #define CAN_TLM_NODE_ID 1
 
+// Packed telemetry packet for classic CAN (split into 4-byte chunks).
+#define CAN_TLM_PACKET_SIZE 24
+#define CAN_TLM_PACKET_CHUNK_BYTES 4
+#define CAN_TLM_PACKET_CHUNKS (CAN_TLM_PACKET_SIZE / CAN_TLM_PACKET_CHUNK_BYTES)
+#define CAN_TLM_ID_PACKET_BASE 1400
+
+typedef struct __attribute__((packed)) {
+    uint32_t time_ms;
+    int16_t  altitude_ft;
+    int16_t  vert_vel_fps_x10;
+    int16_t  accel_x_mg;
+    int16_t  accel_y_mg;
+    int16_t  accel_z_mg;
+    int16_t  pitch_deg;
+    int16_t  roll_deg;
+    int16_t  yaw_deg;
+    uint8_t  fsm_state;
+    uint8_t  status_flags;
+    uint8_t  pyro_status;
+    uint8_t  reserved;
+} can_tlm_packet_t;
+
+#ifdef __cplusplus
+static_assert(sizeof(can_tlm_packet_t) == CAN_TLM_PACKET_SIZE, "can_tlm_packet_t size mismatch");
+#else
+_Static_assert(sizeof(can_tlm_packet_t) == CAN_TLM_PACKET_SIZE, "can_tlm_packet_t size mismatch");
+#endif
+
 /*
  * Spawn the periodic telemetry TX task and initialize the internal CANaerospace
  * TX context against the supplied node handle. Must be called once after BSP
