@@ -14,7 +14,7 @@ float gDegOffVert = 0;
 float gAccel[3] = {0};
 float gGyro[3] = {0};
 float gMag[3] = {0};
-float gPressure = 0;
+float gVerticalVelocity_fps = 0;
 uint8_t gPyroStatus = 0;
 
 esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
@@ -197,22 +197,6 @@ void sensor_track_ground_pressure(float pressure_hpa) {
 }
 
 float sensor_get_altitude(float pressure_hpa, float temp) {
-    /*
-    const float R = 287.05f;   // Specific gas constant for dry air (J/(kg·K))
-    const float g = 9.80665f;  // Gravity (m/s²)
-
-    // Convert temperature to Kelvin
-    float temp_k = temp + 273.15f;
-
-    // Hypsometric equation: altitude relative to ground reference
-    float altitude_m = (R * temp_k / g) * logf(SEALEVELPRESSURE_HPA / pressure_hpa);
-    gAltitude = altitude_m * 3.28084f;
-
-    // Store pressure and temperature for SD logging
-    gPressure = pressure_hpa;
-    gTemperature_F = temp * 9.0f / 5.0f + 32.0f;
-    return gAltitude;
-    */
 
     float ground_pressure_hpa = sensor_get_ground_pressure();
 
@@ -224,8 +208,24 @@ float sensor_get_altitude(float pressure_hpa, float temp) {
     float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f)); // meters
     gAltitude = altitude_m * 3.28084f; // feet
 
-    return gAltitude;
+    // Derive vertical velocity by finite-differencing altitude. EMA smooths
+    // the 1 hPa pressure jitter that would otherwise create ~5 ft/s spikes.
+    static int64_t prev_us = 0;
+    static float   prev_alt_ft = 0.0f;
+    int64_t now_us = esp_timer_get_time();
+    if (prev_us != 0) {
+        float dt_s = (float)(now_us - prev_us) * 1e-6f;
+        if (dt_s > 1e-3f) {
+            float vel_inst = (gAltitude - prev_alt_ft) / dt_s;
+            const float alpha = 0.2f;
+            gVerticalVelocity_fps = (1.0f - alpha) * gVerticalVelocity_fps
+                                  + alpha * vel_inst;
+        }
+    }
+    prev_us = now_us;
+    prev_alt_ft = gAltitude;
 
+    return gAltitude;
 }
 
 void sensor_update_flight_data(const imu_calibrated_t *imu) {

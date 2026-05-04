@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Define the possible flight states.
 typedef enum {
     STATE_IDLE,
@@ -58,4 +62,16 @@ void initFlightState(FlightState *fs);
 // calls the callback functions if a new state is entered.
 void updateState(FlightState *fs);
 
+// Read the FSM's current state. Used by telemetry/logging consumers that
+// only have access to the global flight_state via this module rather than
+// reaching into the struct directly.
+State getCurrentFlightState(void);
+
+// Bind the FSM instance the getter above will read from. Call once after
+// initFlightState(&flight_state).
+void registerFlightState(FlightState *fs);
+
+#ifdef __cplusplus
+}
 #endif // FLIGHT_STATE_H
+#endif

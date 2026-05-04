@@ -104,6 +104,10 @@ esp_err_t sd_logger_init(void) {
     return ESP_OK;
 }
 
+bool sd_logger_is_active(void) {
+    return file_open;
+}
+
 esp_err_t reset_sd() {
     
     esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);

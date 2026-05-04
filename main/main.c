@@ -16,7 +16,9 @@
 #include "sensor_mgr.h"
 #include "FlightFSM.h"
 #include "attitude_ekf.h"
+#include "can_telemetry.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -44,6 +46,8 @@ static mag_cal_t mag_cal;
 static FlightState flight_state;
 
 static void init_nvs_flash_memory(void);
+void load_mag_cal();
+void printData();
 
 // RTOS Tasks
 void vImuHandlerTask(void *pvParameters);
@@ -101,16 +105,7 @@ void app_main(void) {
 #endif
 
     // Load mag cal from NVS (persisted from a previous bench session).
-    if (mag_cal_load_nvs(&mag_cal) != ESP_OK || !mag_cal.is_calibrated) {
-        ESP_LOGW(TAG, "Mag cal not in NVS. Flight will run with raw mag; EKF will absorb slowly.");
-        memset(&mag_cal, 0, sizeof(mag_cal));
-        // identity soft-iron so sensor_update_mag passthrough is reasonable
-        mag_cal.soft_iron[0][0] = 1.0f;
-        mag_cal.soft_iron[1][1] = 1.0f;
-        mag_cal.soft_iron[2][2] = 1.0f;
-    } else {
-        ESP_LOGI(TAG, "Mag cal loaded from NVS.");
-    }
+    load_mag_cal();
 
     // Gyro bias calibration (blocking, ~5 seconds)
     imu_calibrate(mini_fc_handle->lsm6dsv80x_handle, &imu_cal);
@@ -118,6 +113,9 @@ void app_main(void) {
     // Sample ambient pressure for ~1 s and use as the altitude=0 reference
     if (baro_calibrate_ground(mini_fc_handle->lps22df_handle) != ESP_OK) {
         ESP_LOGW(TAG, "Ground pressure cal failed, falling back to sea-level default.");
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, false);
+    } else {
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, true);
     }
 
     // Bring up the EKF and seed gyro bias (mdps -> dps)
@@ -131,9 +129,16 @@ void app_main(void) {
 
     /// Flight State Machine
     initFlightState(&flight_state);
+    registerFlightState(&flight_state);  // bind for getCurrentFlightState()
+
+    // CAN telemetry up early so subsequent steps can fire status bits and events.
+    can_telemetry_start(*mini_fc_handle->can_node_hdl);
+    can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
 
     /// SD Card Logger
-    sd_logger_init(); // non-fatal if SD card is absent
+    if (sd_logger_init() != ESP_OK) {
+        can_telemetry_event(EVT_SD_FAIL, 0);
+    }
     
     // Queue inits
     imu_queue = xQueueCreate(10, sizeof(imu_calibrated_t));
@@ -227,6 +232,21 @@ static void init_nvs_flash_memory(void)
     ESP_ERROR_CHECK( err );
 }
 
+void load_mag_cal() {
+    if (mag_cal_load_nvs(&mag_cal) != ESP_OK || !mag_cal.is_calibrated) {
+        ESP_LOGW(TAG, "Mag cal not in NVS. Flight will run with raw mag; EKF will absorb slowly.");
+        memset(&mag_cal, 0, sizeof(mag_cal));
+        // identity soft-iron so sensor_update_mag passthrough is reasonable
+        mag_cal.soft_iron[0][0] = 1.0f;
+        mag_cal.soft_iron[1][1] = 1.0f;
+        mag_cal.soft_iron[2][2] = 1.0f;
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, false);
+    } else {
+        ESP_LOGI(TAG, "Mag cal loaded from NVS.");
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, true);
+    }
+}
+
 void vImuHandlerTask(void *pvParameters) {
     board_handle_t board = (board_handle_t)pvParameters;
     LSM6DSV80X_Object_t *imu = board->lsm6dsv80x_handle;
@@ -270,20 +290,16 @@ void vImuHandlerTask(void *pvParameters) {
             attitude_ekf_get_gyro_bias_dps(bias_dps);
             ESP_LOGW(TAG, "EKF cal done. Gyro bias (dps): X=%.3f Y=%.3f Z=%.3f",
                      bias_dps[0], bias_dps[1], bias_dps[2]);
+            can_telemetry_set_status_bit(CAN_TLM_FLAG_EKF_LOCKED, true);
         }
         cycle++;
 
-        if (++print_counter >= 100) { // 1 Hz at 100 Hz task rate
-            attitude_t att;
-            attitude_ekf_get_attitude(&att);
+        if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
             ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
                      cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
                      cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
                      cal_data.mag_axes[0], cal_data.mag_axes[1], cal_data.mag_axes[2]);
-            ESP_LOGI("AHRS", "yaw=%+7.2f  pitch=%+6.2f  roll=%+7.2f  tilt=%5.1f  q=[%.3f,%.3f,%.3f,%.3f]",
-                     att.yaw_deg, att.pitch_deg, att.roll_deg, att.tilt_deg,
-                     att.quat[0], att.quat[1], att.quat[2], att.quat[3]);
-            print_counter = 0;
+            printData();
         }
 
         // Decimate to 10 Hz before pushing to SD logger queue
@@ -356,23 +372,6 @@ void vAltHandlerTask(void *pvParameters) {
 }
 
 void vSdLoggerTask(void *pvParameters) {
-    //SensorDataPacket_t packet;
-    //while (1) {
-        // Block task until packet is sent from IMU task
-        // if (xQueueReceive(imu_queue, &packet.imu, portMAX_DELAY) == pdTRUE) {
-        //     // Check for latest ALT packet, if no then move on with no delay to reduce timing mismatches
-        //     xQueueReceive(alt_queue, &packet.alt, 0);
-
-        //     // Use a binary semaphore to lock the write SD card when calling task frequently
-        //     if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-        //         if (write_packet(packet) == ESP_OK) {
-        //             ESP_LOGI(TAG, "Wrote packet to SD.");
-        //         }
-        //         xSemaphoreGive(xSemaphore);
-        //     }
-        // }
-        //vTaskDelay(pdMS_TO_TICKS(LOGGING_DELAY_MS)); //add delay for every 100ms
-
     SensorMessage_t msg;
     SensorDataPacket_t packet;
 
@@ -400,5 +399,20 @@ void vSdLoggerTask(void *pvParameters) {
             }
         }
     }
-    //}
+}
+
+void printData() {
+    attitude_t att;
+    attitude_ekf_get_attitude(&att);
+
+    ESP_LOGI("AHRS",
+    "\nYaw:   %d deg"
+    "\nPitch: %d deg"
+    "\nRoll:  %d deg"
+    "\nTilt:  %d deg",
+    (int)att.yaw_deg,
+    (int)att.pitch_deg,
+    (int)att.roll_deg,
+    (int)att.tilt_deg);
+            
 }

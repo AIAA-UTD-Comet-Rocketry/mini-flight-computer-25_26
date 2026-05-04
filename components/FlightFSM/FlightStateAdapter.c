@@ -41,6 +41,18 @@
 /* Extern pyro task handle (defined in main.c) */
 extern TaskHandle_t xPyroTaskHandle;
 
+/* Forward decls from CanAero. Forward-declared rather than #include'd to
+ * avoid a CanAero<->FlightFSM circular component dependency. */
+extern void can_telemetry_event(uint8_t event_type, uint8_t event_data);
+#define EVT_ARMED        0x02
+#define EVT_LAUNCH       0x04
+#define EVT_BURNOUT      0x05
+#define EVT_APOGEE       0x06
+#define EVT_DROGUE_FIRED 0x07
+#define EVT_MAIN_FIRED   0x08
+#define EVT_LANDED       0x09
+#define EVT_DISARMED     0x03
+
 /* Pyro channel bit masks (mirrors pyro_index_t in BSP.h) */
 #define PYRO_DRG1_BIT   (1U << 0)  // drogue1_channel - 35g CO2
 #define PYRO_DRG2_BIT   (1U << 1)  // drogue2_channel - 45g CO2
@@ -87,16 +99,25 @@ uint32_t transDelay = UINT32_MAX;
 #define APOGEE_CONSEC_SAMPLES   3       // consecutive descending samples before apogee confirm
 
 
-/* Redefined Callback Implementations, Called when new state is entered */
+/* Redefined Callback Implementations, Called when new state is entered.
+ * Each transition also fires a CAN event frame for ground telemetry. */
 void enterIdle(void)           { ESP_LOGW(TAG, "Entered IDLE at %lu ms", sensor_get_tick_ms()); }
-void enterArmed(void)          { ESP_LOGW(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms()); }
-void enterDisarm(void)         { ESP_LOGW(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms()); }
-void enterBurning(void)        { ESP_LOGW(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms()); }
-void enterRising(void)         { ESP_LOGW(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms()); }
-void enterApogee(void)         { ESP_LOGW(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms()); }
-void enterDrogueDescent(void)  { ESP_LOGW(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterMainDescent(void)    { ESP_LOGW(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms()); }
+void enterArmed(void)          { ESP_LOGW(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_ARMED, 0); }
+void enterDisarm(void)         { ESP_LOGW(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_DISARMED, 0); }
+void enterBurning(void)        { ESP_LOGW(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_LAUNCH, (uint8_t)(gTotalAcc + 0.5f)); }
+void enterRising(void)         { ESP_LOGW(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_BURNOUT, 0); }
+void enterApogee(void)         { ESP_LOGW(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_APOGEE, 0); }
+void enterDrogueDescent(void)  { ESP_LOGW(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_DROGUE_FIRED, 0); }
+void enterMainDescent(void)    { ESP_LOGW(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_MAIN_FIRED, 0); }
+void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_LANDED, 0); }
 
 /*
  * Redefined Transition Functions, true moves to next.

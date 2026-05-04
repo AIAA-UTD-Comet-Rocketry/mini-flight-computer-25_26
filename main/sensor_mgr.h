@@ -94,8 +94,7 @@ extern float gDegOffVert;     // degrees off vertical
 extern float gAccel[3];       // calibrated accelerometer (g)
 extern float gGyro[3];        // calibrated gyroscope (dps)
 extern float gMag[3];         // magnetometer (raw axes)
-extern float gPressure;       // barometric pressure (hPa)
-extern float gTemperature_F;  // temperature (Fahrenheit)
+extern float gVerticalVelocity_fps;  // vertical velocity from baro (ft/s, +up)
 extern uint8_t gPyroStatus;   // pyro fired bitmask (bit 0-3 = channels 1-4)
 
 // Millisecond tick for FSM timing (wraps esp_timer)
