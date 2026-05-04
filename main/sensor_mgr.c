@@ -15,10 +15,7 @@ float gAccel[3] = {0};
 float gGyro[3] = {0};
 float gMag[3] = {0};
 float gPressure = 0;
-float gTemperature_F = 0;
 uint8_t gPyroStatus = 0;
-
-static float SEALEVELPRESSURE_HPA = 1013.25f; // default sea level
 
 esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
     if (imu == NULL || cal == NULL) {
@@ -109,16 +106,11 @@ esp_err_t mag_calibrate(IIS2MDC_Object_t *mag, mag_cal_t *cal)
     return ESP_OK;
 }
 
-void imu_apply_calibration(const imu_cal_t *cal,
-                           const LSM6DSV80X_Axes_t *raw_accel,
-                           const LSM6DSV80X_Axes_t *raw_gyro,
-                           imu_calibrated_t *out) {
+void imu_apply_calibration(const imu_cal_t *cal, const LSM6DSV80X_Axes_t *raw_accel, const LSM6DSV80X_Axes_t *raw_gyro, imu_calibrated_t *out) {
     // Accel: convert mg -> g (no bias; EKF absorbs offset during cal phase)
     out->accel_g[0] = (float)raw_accel->x / 1000.0f;
     out->accel_g[1] = (float)raw_accel->y / 1000.0f;
     out->accel_g[2] = (float)raw_accel->z / 1000.0f;
-
-    //Function to call when calibrating: UpdateRefMeasurementMagn(accel_data, magn_data, R);
 
     // Gyro: subtract bias (mdps) then convert mdps -> deg/s
     out->gyro_dps[0] = ((float)raw_gyro->x - cal->gyro_bias_mdps[0]) / 1000.0f;
@@ -126,16 +118,86 @@ void imu_apply_calibration(const imu_cal_t *cal,
     out->gyro_dps[2] = ((float)raw_gyro->z - cal->gyro_bias_mdps[2]) / 1000.0f;
 }
 
+void mag_apply_calibration(const mag_cal_t *cal, IIS2MDC_Axes_t *raw_mag, imu_calibrated_t *out)
+{
+    float v[3] = {(float)raw_mag->x, (float)raw_mag->x, (float)raw_mag->x};
+
+    if (cal && cal->is_calibrated) {
+        float corrected[3];
+        for (int i = 0; i < 3; i++) {
+            float biased = v[i] - cal->hard_iron[i];
+            corrected[i] = 0;
+            for (int j = 0; j < 3; j++) {
+                corrected[i] += cal->soft_iron[i][j] * biased;
+            }
+        }
+        out->mag_axes[0] = corrected[0];
+        out->mag_axes[1] = corrected[1];
+        out->mag_axes[2] = corrected[2];
+    } else {
+        out->mag_axes[0] = v[0]; 
+        out->mag_axes[0] = v[1]; 
+        out->mag_axes[0] = v[2];
+    }
+
+    //gMag[0] = out[0]; gMag[1] = out[1]; gMag[2] = out[2];
+}
+
 uint32_t sensor_get_tick_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 void sensor_set_ground_pressure(float pressure_hpa) {
-    SEALEVELPRESSURE_HPA = pressure_hpa;
-    ESP_LOGI(TAG, "Ground pressure set: %.2f hPa", SEALEVELPRESSURE_HPA);
+    g_ground_pressure_hpa = pressure_hpa;
+    ESP_LOGI(TAG, "Ground pressure set: %.2f hPa", pressure_hpa);
 }
 
-float sensor_update_altitude(float pressure_hpa, float temp) {
+float sensor_get_ground_pressure(void) {
+    return g_ground_pressure_hpa;
+}
+
+esp_err_t baro_calibrate_ground(LPS22DF_Object_t *baro) {
+    if (baro == NULL) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGI(TAG, "Sampling ground pressure (%d samples, ~%d s)...",
+             PRESS_CAL_NUM_SAMPLES,
+             (PRESS_CAL_NUM_SAMPLES * PRESS_CAL_SAMPLE_DELAY_MS) / 1000);
+
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < PRESS_CAL_NUM_SAMPLES; i++) {
+        float p = 0.0f;
+        if (LPS22DF_PRESS_GetPressure(baro, &p) == LPS22DF_OK && p > 0.0f) {
+            sum += p;
+            count++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(PRESS_CAL_SAMPLE_DELAY_MS));
+    }
+
+    if (count == 0) {
+        ESP_LOGE(TAG, "Ground pressure cal failed — no valid samples.");
+        return ESP_FAIL;
+    }
+
+    float gnd_p = sum / (float) count;
+
+    sensor_set_ground_pressure(gnd_p);
+    return ESP_OK;
+}
+
+// Slowly re-zero ground pressure to absorb LPS22DF warmup drift and slow
+// atmospheric shifts. Caller must only invoke this while the rocket is
+// physically on the pad (i.e. FSM in IDLE or ARMED). 
+#define GROUND_TRACK_ALPHA 0.01f  // EMA coefficient (smaller = slower)
+
+void sensor_track_ground_pressure(float pressure_hpa) {
+    if (pressure_hpa <= 0.0f) return;
+    g_ground_pressure_hpa = (1.0f - GROUND_TRACK_ALPHA) * g_ground_pressure_hpa
+                          + GROUND_TRACK_ALPHA * pressure_hpa;
+}
+
+float sensor_get_altitude(float pressure_hpa, float temp) {
+    /*
     const float R = 287.05f;   // Specific gas constant for dry air (J/(kg·K))
     const float g = 9.80665f;  // Gravity (m/s²)
 
@@ -150,6 +212,20 @@ float sensor_update_altitude(float pressure_hpa, float temp) {
     gPressure = pressure_hpa;
     gTemperature_F = temp * 9.0f / 5.0f + 32.0f;
     return gAltitude;
+    */
+
+    float ground_pressure_hpa = sensor_get_ground_pressure();
+
+    // Avoid divide-by-zero or nonsense inputs
+    if (ground_pressure_hpa <= 0.0f) return 0.0f;
+
+    // Simplified formula
+    float ratio = pressure_hpa / ground_pressure_hpa;
+    float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f)); // meters
+    gAltitude = altitude_m * 3.28084f; // feet
+
+    return gAltitude;
+
 }
 
 void sensor_update_flight_data(const imu_calibrated_t *imu) {
@@ -157,40 +233,15 @@ void sensor_update_flight_data(const imu_calibrated_t *imu) {
     float ay = imu->accel_g[1];
     float az = imu->accel_g[2];
 
-    // Store calibrated values for SD logging
-    gAccel[0] = ax;  gAccel[1] = ay;  gAccel[2] = az;
+    gAccel[0] = ax;  
+    gAccel[1] = ay;  
+    gAccel[2] = az;
     gGyro[0] = imu->gyro_dps[0];
     gGyro[1] = imu->gyro_dps[1];
     gGyro[2] = imu->gyro_dps[2];
 
     gTotalAcc = sqrtf(ax * ax + ay * ay + az * az);
     // gDegOffVert is now driven by the EKF quaternion in the IMU task.
-}
-
-// Apply in sensor_update_mag()
-MagData_t sensor_update_mag(IIS2MDC_Axes_t axes, const mag_cal_t *cal)
-{
-    float v[3] = {(float)axes.x, (float)axes.y, (float)axes.z};
-    MagData_t out = {0};
-
-    if (cal && cal->is_calibrated) {
-        float corrected[3];
-        for (int i = 0; i < 3; i++) {
-            float biased = v[i] - cal->hard_iron[i];
-            corrected[i] = 0;
-            for (int j = 0; j < 3; j++) {
-                corrected[i] += cal->soft_iron[i][j] * biased;
-            }
-        }
-        out.x = corrected[0];
-        out.y = corrected[1];
-        out.z = corrected[2];
-    } else {
-        out.x = v[0]; out.y = v[1]; out.z = v[2];
-    }
-
-    gMag[0] = out.x; gMag[1] = out.y; gMag[2] = out.z;
-    return out;
 }
 
 esp_err_t mag_cal_save_nvs(const mag_cal_t *mag_cal)

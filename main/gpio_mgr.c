@@ -116,6 +116,13 @@ const uint8_t* g_patterns[pattern_max] = {
     PATTERN_BAHDUM
 };
 
+static const char *pyro_channel_names[] = {
+    [apo1_channel]  = "APO1 CHANNEL",
+    [apo2_channel]  = "APO2 CHANNEL",
+    [main1_channel] = "MAIN1 CHANNEL",
+    [main2_channel] = "MAIN2 CHANNEL",
+};
+
 uint8_t* led_set_patterns[led_max];
 static const char *TAG = "SensorMgr";
 
@@ -296,7 +303,7 @@ void Pyro_Task( board_handle_t *handle )
                 vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
                 gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0); // off
                 
-                ESP_LOGE(TAG, "Pyro ejection for %d!", requestedChannel);
+                ESP_LOGE(TAG, "Pyro ejection for %s!", pyro_channel_names[requestedChannel]);
                 gPyroStatus |= (1 << requestedChannel);
 
                 // Cool off between firing to protect hardware for ematch short

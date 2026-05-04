@@ -91,7 +91,7 @@ esp_err_t sd_logger_init(void) {
         esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
         return ESP_FAIL;
     }
-
+    file_open = true;
 
     // Write CSV header
     sd_write_log(
@@ -137,7 +137,7 @@ esp_err_t sd_write_log(const void* data, size_t len) {
 
 esp_err_t write_packet(SensorDataPacket_t packet) {
     char line[256]; int len;
-    if (log_file == NULL) return ESP_FAIL;
+    //if (log_file == NULL) return ESP_FAIL;
 
     float timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
 
@@ -151,15 +151,15 @@ esp_err_t write_packet(SensorDataPacket_t packet) {
         timestamp_s,
         packet.imu.accel_g[0], packet.imu.accel_g[1], packet.imu.accel_g[2],
         packet.imu.gyro_dps[0], packet.imu.gyro_dps[1], packet.imu.gyro_dps[2],
-        packet.mag.x, packet.mag.y, packet.mag.z,
+        packet.imu.mag_axes[0], packet.imu.mag_axes[1], packet.imu.mag_axes[2],
         packet.alt.pressure, packet.alt.altitude, packet.alt.temp,
-        (gPyroStatus & (1 << 0)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 1)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 2)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 3)) ? 'Y' : 'N');
+        (gPyroStatus & (1U << 0)) ? 'Y' : 'N',
+        (gPyroStatus & (1U << 1)) ? 'Y' : 'N',
+        (gPyroStatus & (1U << 2)) ? 'Y' : 'N',
+        (gPyroStatus & (1U << 3)) ? 'Y' : 'N');
 
     if (len > 0) {
-        sd_write_log(line, (size_t)len);
+        if (sd_write_log(line, (size_t)len) != ESP_OK) return ESP_FAIL;
     }
 
     return ESP_OK;

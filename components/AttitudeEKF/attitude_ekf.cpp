@@ -126,3 +126,38 @@ extern "C" float attitude_ekf_get_tilt_deg(void)
     if (cos_tilt < -1.0f) cos_tilt = -1.0f;
     return acosf(cos_tilt) * RAD_TO_DEG;
 }
+
+extern "C" void attitude_ekf_get_attitude(attitude_t *out)
+{
+    if (out == nullptr) return;
+    if (g_ekf == nullptr) {
+        out->yaw_deg = out->pitch_deg = out->roll_deg = out->tilt_deg = 0.0f;
+        out->quat[0] = 1.0f;
+        out->quat[1] = out->quat[2] = out->quat[3] = 0.0f;
+        return;
+    }
+
+    // Snapshot quaternion once so the four Euler components describe the same instant.
+    float w = g_ekf->X.data[0];
+    float x = g_ekf->X.data[1];
+    float y = g_ekf->X.data[2];
+    float z = g_ekf->X.data[3];
+    out->quat[0] = w;
+    out->quat[1] = x;
+    out->quat[2] = y;
+    out->quat[3] = z;
+
+    // ZYX intrinsic Euler angles (aerospace standard).
+    // pitch is asin(arg) — clamp to handle gimbal lock at +/- 90 deg.
+    float sin_pitch = 2.0f * (w * y - z * x);
+    if (sin_pitch >  1.0f) sin_pitch =  1.0f;
+    if (sin_pitch < -1.0f) sin_pitch = -1.0f;
+    out->pitch_deg = asinf(sin_pitch) * RAD_TO_DEG;
+    out->roll_deg  = atan2f(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y)) * RAD_TO_DEG;
+    out->yaw_deg   = atan2f(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z)) * RAD_TO_DEG;
+
+    float cos_tilt = 1.0f - 2.0f * (x * x + y * y);
+    if (cos_tilt >  1.0f) cos_tilt =  1.0f;
+    if (cos_tilt < -1.0f) cos_tilt = -1.0f;
+    out->tilt_deg = acosf(cos_tilt) * RAD_TO_DEG;
+}

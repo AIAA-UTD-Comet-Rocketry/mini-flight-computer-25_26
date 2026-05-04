@@ -42,10 +42,10 @@
 extern TaskHandle_t xPyroTaskHandle;
 
 /* Pyro channel bit masks (mirrors pyro_index_t in BSP.h) */
-#define PYRO_DRG1_BIT   (1 << 0)  // drogue1_channel - 35g CO2
-#define PYRO_DRG2_BIT   (1 << 1)  // drogue2_channel - 45g CO2
-#define PYRO_MAIN1_BIT  (1 << 2)  // main1_channel - TD2 ejection
-#define PYRO_MAIN2_BIT  (1 << 3)  // main2_channel - TD2 ejection
+#define PYRO_DRG1_BIT   (1U << 0)  // drogue1_channel - 35g CO2
+#define PYRO_DRG2_BIT   (1U << 1)  // drogue2_channel - 45g CO2
+#define PYRO_MAIN1_BIT  (1U << 2)  // main1_channel - TD2 ejection
+#define PYRO_MAIN2_BIT  (1U << 3)  // main2_channel - TD2 ejection
 
 /* Extern data streams (defined in sensor_mgr.c) */
 extern float gAltitude;
