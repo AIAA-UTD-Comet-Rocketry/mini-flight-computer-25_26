@@ -523,7 +523,7 @@ static esp_err_t bsp_TWAI_init(void)
         .io_cfg.quanta_clk_out = -1,
         .bit_timing.bitrate = 250000,  // 250 kbps bitrate
         .tx_queue_depth = 5,        // Transmit queue depth set to 5
-        .fail_retry_cnt = -1, // Re-transmit infinitely 
+        //.fail_retry_cnt = -1, // Re-transmit infinitely 
     };
     // Create a new TWAI controller driver instance
     ret = twai_new_node_onchip(&can_node_config, &can_node_hdl);

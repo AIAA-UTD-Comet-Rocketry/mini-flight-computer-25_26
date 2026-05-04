@@ -127,11 +127,11 @@ static esp_err_t send_frame(canas_tx_ctx_t *ctx, canas_tx_slot_t *slot, uint16_t
 
     //TODO: LED_setPattern(led_can_tx, pattern_fast_blink);
 
-    ESP_LOGI(TAG, "CAN id=0x%03X dlc=%u", frame->header.id, frame->header.dlc);
-    ESP_LOG_BUFFER_HEX(TAG, frame->buffer, frame->header.dlc);
-    ESP_LOGI(TAG, "node=%u dtc=%u svc=%u msg=%u payload_len=%u",
-         frame->buffer[0], frame->buffer[1], frame->buffer[2],
-         frame->buffer[3], frame->header.dlc - 4);
+    // ESP_LOGI(TAG, "CAN id=0x%03X dlc=%u", frame->header.id, frame->header.dlc);
+    // ESP_LOG_BUFFER_HEX(TAG, frame->buffer, frame->header.dlc);
+    // ESP_LOGI(TAG, "node=%u dtc=%u svc=%u msg=%u payload_len=%u",
+    //      frame->buffer[0], frame->buffer[1], frame->buffer[2],
+    //      frame->buffer[3], frame->header.dlc - 4);
 
     if (ret != ESP_OK) release_slot(slot);
 
@@ -146,7 +146,7 @@ esp_err_t canas_tx_float(canas_tx_ctx_t *ctx, uint16_t msg_id, float v) {
     memcpy(&bits, &v, sizeof(bits));
     be_u32_store(p, bits);
 
-    ESP_LOGI(TAG, "TX id=0x%03X float data=%f", msg_id, v);
+    //ESP_LOGI(TAG, "TX id=0x%03X float data=%f", msg_id, v);
 
     return send_frame(ctx, slot, msg_id, 8);
 }
@@ -157,7 +157,7 @@ esp_err_t canas_tx_short(canas_tx_ctx_t *ctx, uint16_t msg_id, int16_t v) {
     uint8_t *p = fill_header(ctx, slot->buf, CANAS_DTC_SHORT);
     be_u16_store(p, (uint16_t)v);
 
-    ESP_LOGI(TAG, "TX id=0x%03X short data=%d", msg_id, v);
+    //ESP_LOGI(TAG, "TX id=0x%03X short data=%d", msg_id, v);
 
     return send_frame(ctx, slot, msg_id, 6);
 }
@@ -168,7 +168,7 @@ esp_err_t canas_tx_uchar(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t v) {
     uint8_t *p = fill_header(ctx, slot->buf, CANAS_DTC_UCHAR);
     p[0] = v;
 
-    ESP_LOGI(TAG, "TX id=0x%03X uchar data=%d", msg_id, v);
+    //ESP_LOGI(TAG, "TX id=0x%03X uchar data=%d", msg_id, v);
 
     return send_frame(ctx, slot, msg_id, 5);
 }
@@ -179,7 +179,7 @@ esp_err_t canas_tx_bchar(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t bits) {
     uint8_t *p = fill_header(ctx, slot->buf, CANAS_DTC_BCHAR);
     p[0] = bits;
 
-    ESP_LOGI(TAG, "TX id=0x%03X bchar data=%d", msg_id, bits);
+    //ESP_LOGI(TAG, "TX id=0x%03X bchar data=%d", msg_id, bits);
 
     return send_frame(ctx, slot, msg_id, 5);
 }
@@ -191,7 +191,7 @@ esp_err_t canas_tx_uchar2(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t a, uint8
     p[0] = a;
     p[1] = b;
 
-    ESP_LOGI(TAG, "TX id=0x%03X uchar2 data=%d, %d", msg_id, a, b);
+    //ESP_LOGI(TAG, "TX id=0x%03X uchar2 data=%d, %d", msg_id, a, b);
 
     return send_frame(ctx, slot, msg_id, 6);
 }
@@ -205,7 +205,7 @@ esp_err_t canas_tx_uchar4(canas_tx_ctx_t *ctx, uint16_t msg_id, uint8_t a, uint8
     p[2] = c;
     p[3] = d;
 
-    ESP_LOGI(TAG, "TX id=0x%03X uchar4 data=%d, %d, %d, %d", msg_id, a, b, c, d);
+    //ESP_LOGI(TAG, "TX id=0x%03X uchar4 data=%d, %d, %d, %d", msg_id, a, b, c, d);
 
     return send_frame(ctx, slot, msg_id, 8);
 }

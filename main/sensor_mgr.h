@@ -11,7 +11,7 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
-#include "iis2mdc.h"
+     #include "iis2mdc.h"
 #include "lsm6dsv80x.h"
 #include "lps22df.h"
 
@@ -61,6 +61,24 @@ typedef struct {
         AltData_t alt;
     } data;
 } SensorMessage_t;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Accel_Axes_t;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Gyro_Axes_t;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Mag_Axes_t;
 
 /**
  * Run startup gyro-bias calibration by averaging samples while stationary.

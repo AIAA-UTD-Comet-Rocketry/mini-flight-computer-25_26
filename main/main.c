@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "main.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
@@ -22,6 +24,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#define UTDMALLOC(n, els)              (els *) malloc((n)*sizeof(els))
 #define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
 #define SENSOR_DELAY_MS 10 // 1/10ms = 100Hz
 #define LOGGING_DELAY_MS 100 // ms
@@ -37,8 +40,6 @@
 // Uncomment, flash, perform figure-8 rotation, observe save log, halt.
 // Recomment and re-flash for normal flight.
 //#define DO_MAG_CAL
-
-// TODO: CAN Aerospace integration with telemetry data
 
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
@@ -59,6 +60,8 @@ static QueueHandle_t imu_queue = NULL, alt_queue = NULL, sensor_queue = NULL;
 SemaphoreHandle_t xSemaphore;
 TaskHandle_t xPyroTaskHandle = NULL, xLEDTaskHandle = NULL;
 
+FusedPacket_ptr fusedData_p;
+
 // Macros
 #define CHECK_TASK_CREATION(ret, err_msg) \
     if((ret) != pdPASS) { \
@@ -68,6 +71,11 @@ TaskHandle_t xPyroTaskHandle = NULL, xLEDTaskHandle = NULL;
 void app_main(void) {
     (void)TAG; // Stop compile warnings, unused debug variables are not a concern
 
+    fusedData_p = UTDMALLOC(1, FusedPacket_t);
+    if (fusedData_p == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate fused packet buffer.");
+        while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
     // Handle config
     static board_handle_t mini_fc_handle;
 
@@ -104,9 +112,6 @@ void app_main(void) {
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 #endif
 
-    // CAN telemetry up early so subsequent steps can fire status bits and events.
-    can_telemetry_start(*mini_fc_handle->can_node_hdl);
-    can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
     //xTaskCreate(can_tx_task, "can_tx_task", 2048, NULL, 5, NULL);
 
     // Load mag cal from NVS (persisted from a previous bench session).
@@ -135,6 +140,10 @@ void app_main(void) {
     /// Flight State Machine
     initFlightState(&flight_state);
     registerFlightState(&flight_state);  // bind for getCurrentFlightState()
+
+    // CAN telemetry up early so subsequent steps can fire status bits and events.
+    can_telemetry_start(*mini_fc_handle->can_node_hdl);
+    can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
 
     /// SD Card Logger
     if (sd_logger_init() != ESP_OK) {
@@ -279,6 +288,9 @@ void vImuHandlerTask(void *pvParameters) {
         prev_us = now_us;
         if (dt_s <= 0.0f || dt_s > 0.1f) dt_s = SENSOR_DELAY_MS * 0.001f; // fallback on jitter
 
+        // EKF is fed PCB-frame accel/gyro/mag — its model assumes the body
+        // frame the sensors live in. Mount correction is applied to OUTPUTS
+        // afterwards.
         if (cycle < EKF_CAL_CYCLES) {
             attitude_ekf_calibrate_step(cal_data.accel_g, cal_data.gyro_dps, cal_data.mag_axes, dt_s);
         } else {
@@ -291,9 +303,21 @@ void vImuHandlerTask(void *pvParameters) {
             attitude_ekf_get_gyro_bias_dps(bias_dps);
             ESP_LOGW(TAG, "EKF cal done. Gyro bias (dps): X=%.3f Y=%.3f Z=%.3f",
                      bias_dps[0], bias_dps[1], bias_dps[2]);
+            // Snapshot current EKF quaternion as the PCB-to-rocket mounting
+            // offset. From now on, accel/gyro and yaw/pitch/roll readouts will
+            // be in rocket body frame regardless of how the PCB is bolted in.
+            attitude_ekf_capture_mounting();
+            ESP_LOGW(TAG, "Mounting offset captured.");
             can_telemetry_set_status_bit(CAN_TLM_FLAG_EKF_LOCKED, true);
         }
         cycle++;
+
+        // After mounting capture, rotate calibrated accel and gyro into the
+        // rocket body frame so logging, FSM, and CAN telemetry all see them
+        // as if the PCB were mounted nose-up. No-op until cycle reaches
+        // EKF_CAL_CYCLES.
+        attitude_ekf_apply_mount(cal_data.accel_g, cal_data.accel_g);
+        attitude_ekf_apply_mount(cal_data.gyro_dps, cal_data.gyro_dps);
 
         if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
             // ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
@@ -374,23 +398,36 @@ void vAltHandlerTask(void *pvParameters) {
 
 void vSdLoggerTask(void *pvParameters) {
     SensorMessage_t msg;
-    SensorDataPacket_t packet;
+    LogSensorRecord_t record;
+    attitude_t att;
 
     while (1) {
         // Block task until packet is sent from IMU/Alt task
         if (xQueueReceive(sensor_queue, &msg, portMAX_DELAY)) {
             switch (msg.type) {
                 case SENSOR_IMU:
-                    packet.imu = msg.data.imu;
+                    record.accel.x = msg.data.imu.accel_g[0];
+                    record.accel.y = msg.data.imu.accel_g[1];
+                    record.accel.z = msg.data.imu.accel_g[2];
+
+                    record.accel.x = msg.data.imu.gyro_dps[0];
+                    record.accel.y = msg.data.imu.gyro_dps[1];
+                    record.accel.z = msg.data.imu.gyro_dps[2];
                     break;
                 case SENSOR_ALT:
-                    packet.alt = msg.data.alt;
+                    record.baro = msg.data.alt;
                     break;
             }
 
+            attitude_ekf_get_attitude(&att);
+            record.timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
+            record.attitude = att;
+            record.pyroStatus = gPyroStatus;
+            record.flightState = getCurrentFlightState();
+
             // Use a mutex to lock the write SD card task when calling frequently
             if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-                if (write_packet(packet) == ESP_OK) {
+                if (write_packet(record) == ESP_OK) {
                     //ESP_LOGI(TAG, "Wrote packet to SD.");
                 }
                 else {
@@ -402,36 +439,12 @@ void vSdLoggerTask(void *pvParameters) {
     }
 }
 
-// CAN TX task for testing CAN bus transceiver
-// Sends a counter frame every second on ID 0x100
-static void can_tx_task(void *arg) {
-    uint32_t counter = 0;
-
-    while (1) {
-        twai_message_t tx_msg = {};
-        tx_msg.identifier = 0x100;
-        tx_msg.data_length_code = 4;
-        tx_msg.data[0] = (counter >> 24) & 0xFF;
-        tx_msg.data[1] = (counter >> 16) & 0xFF;
-        tx_msg.data[2] = (counter >>  8) & 0xFF;
-        tx_msg.data[3] = (counter      ) & 0xFF;
-
-        //esp_err_t err = twai_transmit(&tx_msg, pdMS_TO_TICKS(1000));
-        // if (err == ESP_OK) {
-        //     ESP_LOGI("CAN-TX", "Sent ID=0x%03X counter=%lu", (unsigned)tx_msg.identifier, (unsigned long)counter);
-        // } else {
-        //     ESP_LOGW("CAN-TX", "TX failed: %s", esp_err_to_name(err));
-        // }
-
-        counter++;
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
 void printData() {
     attitude_t att;
     attitude_ekf_get_attitude(&att);
 
+    //fusedData_p->attitude = att;
+    
     ESP_LOGI("AHRS",
     "\n\tYaw:   %d deg"
     "\n\tPitch: %d deg"

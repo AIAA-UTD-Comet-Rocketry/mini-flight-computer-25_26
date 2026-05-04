@@ -23,6 +23,7 @@ extern "C" {
     extern uint8_t gPyroStatus;
     State getCurrentFlightState(void);   // defined in FlightFSM.c (added)
     bool  sd_logger_is_active(void);     // defined in main/sd_logger.c (added)
+    //extern FusedDataPacket_t dataPacket;
 }
 
 static const char *TAG = "CanTLM";

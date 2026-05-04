@@ -19,10 +19,11 @@ static bool file_open = false;
 static const char *TAG = "SD_Logger";
 static const char *file_header = 
         "timestamp_s,"
-        "gyro_x,gyro_y,gyro_z,"
         "acc_x,acc_y,acc_z,"
-        "mag_x,mag_y,mag_z,"
+        "gyro_x,gyro_y,gyro_z,"
+        "yaw_deg, pitch_deg, roll_deg, tilt_deg,"
         "pressure_hpa,altitude_ft,temp_f,"
+        "flight state,"
         "drogue1,drogue2,main1,main2\n";
 
 static FILE *log_file = NULL;
@@ -139,28 +140,28 @@ esp_err_t sd_write_log(const void* data, size_t len) {
     return ESP_OK;
 }
 
-esp_err_t write_packet(SensorDataPacket_t packet) {
+esp_err_t write_packet(LogSensorRecord_t record) {
     char line[256]; int len;
     //if (log_file == NULL) return ESP_FAIL;
 
-    float timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
-
     len = snprintf(line, 256,
-        "%.3f,"
-        "%.3f,%.3f,%.3f,"
-        "%.3f,%.3f,%.3f,"
-        "%.0f,%.0f,%.0f,"
-        "%.4f,%.2f,%.1f,"
+        "%.2f,"
+        "%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,"
+        "%u,"
         "%c,%c,%c,%c\n",
-        timestamp_s,
-        packet.imu.accel_g[0], packet.imu.accel_g[1], packet.imu.accel_g[2],
-        packet.imu.gyro_dps[0], packet.imu.gyro_dps[1], packet.imu.gyro_dps[2],
-        packet.imu.mag_axes[0], packet.imu.mag_axes[1], packet.imu.mag_axes[2],
-        packet.alt.pressure, packet.alt.altitude, packet.alt.temp,
-        (gPyroStatus & (1U << 0)) ? 'Y' : 'N',
-        (gPyroStatus & (1U << 1)) ? 'Y' : 'N',
-        (gPyroStatus & (1U << 2)) ? 'Y' : 'N',
-        (gPyroStatus & (1U << 3)) ? 'Y' : 'N');
+        record.timestamp_s,
+        record.accel.x, record.accel.y, record.accel.z,
+        record.gyro.x, record.gyro.y, record.gyro.z,
+        record.attitude.yaw_deg, record.attitude.pitch_deg, record.attitude.roll_deg, record.attitude.tilt_deg,
+        record.baro.pressure, record.baro.altitude, record.baro.temp,
+        (unsigned int)record.flightState,
+        (record.pyroStatus & (1U << 0)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 1)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 2)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 3)) ? 'Y' : 'N');
 
     if (len > 0) {
         if (sd_write_log(line, (size_t)len) != ESP_OK) return ESP_FAIL;
@@ -168,3 +169,4 @@ esp_err_t write_packet(SensorDataPacket_t packet) {
 
     return ESP_OK;
 }
+
