@@ -20,10 +20,10 @@ typedef struct {
     Accel_Axes_t currAcc;       // mg
     Gyro_Axes_t currGyro;      // mdps
     Mag_Axes_t currMag;
-    float currPress;
-    float currTempF;
+    float currPress;           // hPa
+    float currTempF;            // F
     attitude_t attitude;             // Yaw, Pitch, Roll in degrees
-    float gAltitude;
+    float gAltitude;                // ft
     float gVerticalVelocity;        // ft/s
     float gTotalAcc;                // gravity magnititude
     float gAccelVelocity;           // m/s^2, gravity removed

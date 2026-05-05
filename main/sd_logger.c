@@ -17,6 +17,7 @@ static FIL internal_log_file;
 static bool file_open = false;
 
 static const char *TAG = "SD_Logger";
+static uint32_t s_sd_write_count = 0;
 static const char *file_header = 
         "timestamp_s,"
         "acc_x,acc_y,acc_z,"
@@ -129,7 +130,9 @@ esp_err_t sd_write_log(const void* data, size_t len) {
         ESP_LOGE(TAG, "f_write failed: res=%d written=%u", res, written);
         reset_sd();
         return ESP_FAIL;
-    }\r\n    return ESP_OK;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t write_packet(LogSensorRecord_t record) {
@@ -156,6 +159,14 @@ esp_err_t write_packet(LogSensorRecord_t record) {
 
     if (len > 0) {
         if (sd_write_log(line, (size_t)len) != ESP_OK) return ESP_FAIL;
+        s_sd_write_count++;
+        if ((s_sd_write_count % 10) == 0) {
+            FRESULT res = f_sync(&internal_log_file);
+            if (res != FR_OK) {
+                ESP_LOGE(TAG, "f_sync failed: %d", res);
+                return ESP_FAIL;
+            }
+        }
     }
 
     return ESP_OK;
