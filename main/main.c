@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
@@ -26,6 +27,20 @@
 static const char *TAG = "Main";
 static imu_cal_t imu_cal;
 static FlightState flight_state;
+typedef struct {
+    float altitude_ft;
+
+    float accel_x_g;
+    float accel_y_g;
+    float accel_z_g;
+
+    float yaw_deg;
+    float pitch_deg;
+    float roll_deg;
+
+    uint8_t fsm_state;
+    uint8_t error_code;
+} CanTelemetryPacket_t;
 
 // Tasks
 void vImuHandlerTask(void *pvParameters);
@@ -33,6 +48,7 @@ void vMagHandlerTask(void *pvParameters);
 void vAltHandlerTask(void *pvParameters);
 void vSdLoggerTask(void *pvParameters);
 void vFsmTask(void *pvParameters);
+void vCanTelemetryTask(void *pvParameters);
 
 static QueueHandle_t imu_queue = NULL, alt_queue = NULL, mag_queue = NULL;
 
@@ -128,6 +144,7 @@ void app_main(void) {
                            (void*) mini_fc_handle->lps22df_handle,
                            1,
                            &xAltTaskHandle);
+    CHECK_TASK_CREATION(task_ret, "Altitude task failed to create!");
     // Flight State Machine
     TaskHandle_t xFsmTaskHandle;
     task_ret = xTaskCreate(vFsmTask,
@@ -137,6 +154,16 @@ void app_main(void) {
                            2,  // higher priority than sensor tasks
                            &xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
+
+    // CAN Telemetry
+    TaskHandle_t xCanTelemetryHandle;
+    task_ret = xTaskCreate(vCanTelemetryTask,
+                           "CAN Telemetry",
+                           4096,
+                           NULL,
+                           2,
+                           &xCanTelemetryHandle);
+    CHECK_TASK_CREATION(task_ret, "CAN Telemetry task failed to create!");
     // LED
     xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, NULL);
     // Pyro
@@ -258,3 +285,38 @@ void vSdLoggerTask(void *pvParameters) {
         }
     }
 }
+
+void vCanTelemetryTask(void *pvParameters) {
+    (void)pvParameters;
+
+    imu_calibrated_t imu_data;
+    AltData_t alt_data;
+    CanTelemetryPacket_t telemetry;
+
+    while (1) {
+        if (xQueueReceive(imu_queue, &imu_data, pdMS_TO_TICKS(20)) == pdPASS &&
+            xQueueReceive(alt_queue, &alt_data, pdMS_TO_TICKS(20)) == pdPASS) {
+
+            telemetry.altitude_ft = alt_data.altitude;
+
+            telemetry.accel_x_g = imu_data.accel_g[0];
+            telemetry.accel_y_g = imu_data.accel_g[1];
+            telemetry.accel_z_g = imu_data.accel_g[2];
+
+            telemetry.yaw_deg = 0.0f;
+            telemetry.pitch_deg = 0.0f;
+            telemetry.roll_deg = 0.0f;
+
+            telemetry.fsm_state = flight_state.current_state;   // adjust field name
+            telemetry.error_code = 0;                           // replace with real error enum later
+
+            can_send_telemetry(&telemetry);                     // implement in CAN driver
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz telemetry
+    }
+}
+
+    
+
+
