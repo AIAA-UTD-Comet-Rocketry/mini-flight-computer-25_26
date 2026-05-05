@@ -120,7 +120,7 @@ void imu_apply_calibration(const imu_cal_t *cal, const LSM6DSV80X_Axes_t *raw_ac
 
 void mag_apply_calibration(const mag_cal_t *cal, IIS2MDC_Axes_t *raw_mag, imu_calibrated_t *out)
 {
-    float v[3] = {(float)raw_mag->x, (float)raw_mag->x, (float)raw_mag->x};
+    float v[3] = {(float)raw_mag->x, (float)raw_mag->y, (float)raw_mag->z};
 
     if (cal && cal->is_calibrated) {
         float corrected[3];
@@ -135,9 +135,9 @@ void mag_apply_calibration(const mag_cal_t *cal, IIS2MDC_Axes_t *raw_mag, imu_ca
         out->mag_axes[1] = corrected[1];
         out->mag_axes[2] = corrected[2];
     } else {
-        out->mag_axes[0] = v[0]; 
-        out->mag_axes[0] = v[1]; 
-        out->mag_axes[0] = v[2];
+        out->mag_axes[0] = v[0];
+        out->mag_axes[1] = v[1];
+        out->mag_axes[2] = v[2];
     }
 
     //gMag[0] = out[0]; gMag[1] = out[1]; gMag[2] = out[2];
@@ -203,29 +203,97 @@ float sensor_get_altitude(float pressure_hpa, float temp) {
     // Avoid divide-by-zero or nonsense inputs
     if (ground_pressure_hpa <= 0.0f) return 0.0f;
 
-    // Simplified formula
+    // International Standard Atmosphere altitude approximation.
     float ratio = pressure_hpa / ground_pressure_hpa;
-    float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f)); // meters
-    gAltitude = altitude_m * 3.28084f; // feet
+    float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f));
+    gAltitude = altitude_m * 3.28084f;
+    return gAltitude;
+}
 
-    // Derive vertical velocity by finite-differencing altitude. EMA smooths
-    // the 1 hPa pressure jitter that would otherwise create ~5 ft/s spikes.
-    static int64_t prev_us = 0;
-    static float   prev_alt_ft = 0.0f;
+// ---- Complementary filter on vertical velocity ----
+// Predict: integrate net vertical accel (a - 1g) at the IMU task rate. The
+// integration drifts due to bias/noise, so the correct() step nudges us back
+// toward baro-derived velocity each time a fresh pressure window completes.
+//
+// Baro noise (~1–2 ft sample-to-sample) is large compared to a 10 ms diff,
+// so we average N alt samples into a 10 Hz "window" before differentiating.
+// This drops baro_vel noise by ~sqrt(N) and decouples the correction rate
+// from the alt task's actual polling rate.
+//
+// Tuning: K = 0.1 → corner ~1.6 Hz at the post-decimation 10 Hz rate.
+#define VEL_FILTER_K       0.1f
+#define VEL_BARO_DECIM     10        // alt task @ 100 Hz → correction @ 10 Hz
+#define G_FT_PER_S2        32.174f
+
+void sensor_velocity_predict(float vert_accel_g, float dt_s) {
+    if (dt_s <= 0.0f || dt_s > 0.1f) return; // ignore garbage dt
+    float net_g = vert_accel_g - 1.0f;       // remove gravity
+    gVerticalVelocity_fps += net_g * G_FT_PER_S2 * dt_s;
+}
+
+void sensor_velocity_correct(float new_alt_ft) {
+    static int     s_count = 0;
+    static float   s_alt_sum = 0.0f;
+    static float   s_prev_alt_avg = 0.0f;
+    static int64_t s_prev_us = 0;
+    static bool    s_have_prev = false;
+
+    s_alt_sum += new_alt_ft;
+    s_count++;
+    if (s_count < VEL_BARO_DECIM) return;
+
+    float alt_avg = s_alt_sum / (float)s_count;
     int64_t now_us = esp_timer_get_time();
-    if (prev_us != 0) {
-        float dt_s = (float)(now_us - prev_us) * 1e-6f;
+    s_alt_sum = 0.0f;
+    s_count = 0;
+
+    if (s_have_prev) {
+        float dt_s = (float)(now_us - s_prev_us) * 1e-6f;
         if (dt_s > 1e-3f) {
-            float vel_inst = (gAltitude - prev_alt_ft) / dt_s;
-            const float alpha = 0.2f;
-            gVerticalVelocity_fps = (1.0f - alpha) * gVerticalVelocity_fps
-                                  + alpha * vel_inst;
+            float baro_vel = (alt_avg - s_prev_alt_avg) / dt_s;
+            gVerticalVelocity_fps = (1.0f - VEL_FILTER_K) * gVerticalVelocity_fps
+                                  + VEL_FILTER_K * baro_vel;
         }
     }
-    prev_us = now_us;
-    prev_alt_ft = gAltitude;
+    s_prev_us = now_us;
+    s_prev_alt_avg = alt_avg;
+    s_have_prev = true;
+}
 
-    return gAltitude;
+// ---- Axis remap (FusionRemap-style) ----
+// Permutes/sign-flips a sensor 3-vector into the rocket body frame.
+// in/out may alias — internal temporaries make that safe.
+void sensor_remap_axes(const float in[3], sensor_axis_align_t align, float out[3]) {
+    float x = in[0], y = in[1], z = in[2];
+    float rx, ry, rz;
+    switch (align) {
+        default:
+        case AXIS_ALIGN_PXPYPZ: rx = +x; ry = +y; rz = +z; break;
+        case AXIS_ALIGN_PXPZNY: rx = +x; ry = +z; rz = -y; break;
+        case AXIS_ALIGN_PXNZPY: rx = +x; ry = -z; rz = +y; break;
+        case AXIS_ALIGN_PXNYNZ: rx = +x; ry = -y; rz = -z; break;
+        case AXIS_ALIGN_PYPXNZ: rx = +y; ry = +x; rz = -z; break;
+        case AXIS_ALIGN_PYPZPX: rx = +y; ry = +z; rz = +x; break;
+        case AXIS_ALIGN_PYNZNX: rx = +y; ry = -z; rz = -x; break;
+        case AXIS_ALIGN_PYNXPZ: rx = +y; ry = -x; rz = +z; break;
+        case AXIS_ALIGN_PZPXPY: rx = +z; ry = +x; rz = +y; break;
+        case AXIS_ALIGN_PZPYNX: rx = +z; ry = +y; rz = -x; break;
+        case AXIS_ALIGN_PZNYPX: rx = +z; ry = -y; rz = +x; break;
+        case AXIS_ALIGN_PZNXNY: rx = +z; ry = -x; rz = -y; break;
+        case AXIS_ALIGN_NZPXNY: rx = -z; ry = +x; rz = -y; break;
+        case AXIS_ALIGN_NZPYPX: rx = -z; ry = +y; rz = +x; break;
+        case AXIS_ALIGN_NZNYNX: rx = -z; ry = -y; rz = -x; break;
+        case AXIS_ALIGN_NZNXPY: rx = -z; ry = -x; rz = +y; break;
+        case AXIS_ALIGN_NYPXPZ: rx = -y; ry = +x; rz = +z; break;
+        case AXIS_ALIGN_NYPZNX: rx = -y; ry = +z; rz = -x; break;
+        case AXIS_ALIGN_NYNZPX: rx = -y; ry = -z; rz = +x; break;
+        case AXIS_ALIGN_NYNXNZ: rx = -y; ry = -x; rz = -z; break;
+        case AXIS_ALIGN_NXPYNZ: rx = -x; ry = +y; rz = -z; break;
+        case AXIS_ALIGN_NXPZPY: rx = -x; ry = +z; rz = +y; break;
+        case AXIS_ALIGN_NXNZNY: rx = -x; ry = -z; rz = -y; break;
+        case AXIS_ALIGN_NXNYPZ: rx = -x; ry = -y; rz = +z; break;
+    }
+    out[0] = rx; out[1] = ry; out[2] = rz;
 }
 
 void sensor_update_flight_data(const imu_calibrated_t *imu) {

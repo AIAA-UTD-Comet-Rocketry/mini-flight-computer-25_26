@@ -24,8 +24,8 @@ typedef struct {
     float currTempF;
     attitude_t attitude;             // Yaw, Pitch, Roll in degrees
     float gAltitude;
-    float gVerticalVelocity;
-    float gTotalAcc;                // gravity vector
+    float gVerticalVelocity;        // ft/s
+    float gTotalAcc;                // gravity magnititude
     float gAccelVelocity;           // m/s^2, gravity removed
 } FusedPacket_t, *FusedPacket_ptr;
 

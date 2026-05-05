@@ -20,10 +20,10 @@ static const char *TAG = "SD_Logger";
 static const char *file_header = 
         "timestamp_s,"
         "acc_x,acc_y,acc_z,"
-        "gyro_x,gyro_y,gyro_z,"
+        "totalAcc_g, vertVel_fps,"
         "yaw_deg, pitch_deg, roll_deg, tilt_deg,"
         "pressure_hpa,altitude_ft,temp_f,"
-        "flight state,"
+        "flight_state,"
         "drogue1,drogue2,main1,main2\n";
 
 static FILE *log_file = NULL;
@@ -129,35 +129,26 @@ esp_err_t sd_write_log(const void* data, size_t len) {
         ESP_LOGE(TAG, "f_write failed: res=%d written=%u", res, written);
         reset_sd();
         return ESP_FAIL;
-    }
-
-    res = f_sync(&internal_log_file);
-    if(res != FR_OK) {
-        ESP_LOGE(TAG, "f_sync failed: %d", res);
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
+    }\r\n    return ESP_OK;
 }
 
 esp_err_t write_packet(LogSensorRecord_t record) {
     char line[256]; int len;
-    //if (log_file == NULL) return ESP_FAIL;
 
     len = snprintf(line, 256,
-        "%.2f,"
+        "%.1f,"
         "%.1f,%.1f,%.1f,"
-        "%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,"
         "%.1f,%.1f,%.1f,%.1f,"
         "%.1f,%.1f,%.1f,"
-        "%u,"
+        "%d,"
         "%c,%c,%c,%c\n",
         record.timestamp_s,
         record.accel.x, record.accel.y, record.accel.z,
-        record.gyro.x, record.gyro.y, record.gyro.z,
-        record.attitude.yaw_deg, record.attitude.pitch_deg, record.attitude.roll_deg, record.attitude.tilt_deg,
+        record.gTotalAcc, record.gVertVelocity,
+        record.orientation.yaw_deg, record.orientation.pitch_deg, record.orientation.roll_deg, record.orientation.tilt_deg,
         record.baro.pressure, record.baro.altitude, record.baro.temp,
-        (unsigned int)record.flightState,
+        record.flightState,
         (record.pyroStatus & (1U << 0)) ? 'Y' : 'N',
         (record.pyroStatus & (1U << 1)) ? 'Y' : 'N',
         (record.pyroStatus & (1U << 2)) ? 'Y' : 'N',
@@ -170,3 +161,23 @@ esp_err_t write_packet(LogSensorRecord_t record) {
     return ESP_OK;
 }
 
+// Unmount partition and disable SDMMC peripheral
+esp_err_t sd_safe_unmount(void) {
+    if (!file_open) return ESP_OK;
+
+    // Flush and close the CSV file first
+    FRESULT res = f_sync(&internal_log_file);
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "f_sync failed: %d", res);
+    }
+    res = f_close(&internal_log_file);
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "f_close failed: %d", res);
+        return ESP_FAIL;
+    }
+
+    file_open = false;
+    esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
+    ESP_LOGW(TAG, "Unmounted sdcard");
+    return ESP_OK;
+}

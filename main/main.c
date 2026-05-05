@@ -59,8 +59,11 @@ void vFsmTask(void *pvParameters);
 static QueueHandle_t imu_queue = NULL, alt_queue = NULL, sensor_queue = NULL;
 SemaphoreHandle_t xSemaphore;
 TaskHandle_t xPyroTaskHandle = NULL, xLEDTaskHandle = NULL;
+TaskHandle_t xSdLoggerHandle = NULL;
 
 FusedPacket_ptr fusedData_p;
+
+static bool sd_logger_started = false;
 
 // Macros
 #define CHECK_TASK_CREATION(ret, err_msg) \
@@ -160,25 +163,26 @@ void app_main(void) {
 
     // RTOS Task creation
     BaseType_t task_ret;
-    TaskHandle_t xImuTaskHandle, xAltTaskHandle;
+    TaskHandle_t xImuTaskHandle;
+    TaskHandle_t xAltTaskHandle;
+    TaskHandle_t xFsmTaskHandle;
 
-    // SD Logger
-    {
-        TaskHandle_t xSdLoggerHandle;
-        task_ret = xTaskCreate(vSdLoggerTask,
-                               "SD Logger",
-                               4096,
-                               NULL,
-                               2,
-                               &xSdLoggerHandle);
-        CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
-    }
+    // SD Logger;
+    task_ret = xTaskCreate(vSdLoggerTask,
+                            "SD Logger",
+                            8 * 1024,
+                            NULL,
+                            1,
+                            &xSdLoggerHandle);
+    CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
+
+    vTaskSuspend( xSdLoggerHandle );
     // IMU + EKF + Mag (all sensor fusion in one 100 Hz task).
     // EKF allocates several dspm::Mat scratch matrices per Process()/Update*()
     // call; 8 KB gives comfortable headroom over the ~3 KB peak observed.
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU+EKF",
-                           8192,
+                           8 * 1024,
                            (void*) mini_fc_handle,
                            2,
                            &xImuTaskHandle);
@@ -186,23 +190,22 @@ void app_main(void) {
     // Pressure
     task_ret = xTaskCreate(vAltHandlerTask,
                            "Absolute Pressure Data Collection",
-                           MIN_STACK_SIZE,
+                           4 * 1024,
                            (void*) mini_fc_handle->lps22df_handle,
                            2,
                            &xAltTaskHandle);
     // Flight State Machine
-    TaskHandle_t xFsmTaskHandle;
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
-                           4096,
+                           4 * 1024,
                            NULL,
                            2,  // higher priority than sensor tasks
                            &xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
     // LED
-    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 4096, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
+    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 1 * 1024, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
     // Pyro
-    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 4096, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
+    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 1 * 1024, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
 
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
 
@@ -281,6 +284,14 @@ void vImuHandlerTask(void *pvParameters) {
 
         imu_apply_calibration(&imu_cal, &accel_axes, &gyro_axes, &cal_data);
         mag_apply_calibration(&mag_cal, &mag_axes, &cal_data);
+
+        // Remap sensor axes to rocket body frame using compile-time alignment.
+        // After this, EKF, FSM, telemetry, and logger all see rocket-frame data.
+        // No-op if BOARD_AXIS_ALIGNMENT is the default identity (PXPYPZ).
+        sensor_remap_axes(cal_data.accel_g,  BOARD_AXIS_ALIGNMENT, cal_data.accel_g);
+        sensor_remap_axes(cal_data.gyro_dps, BOARD_AXIS_ALIGNMENT, cal_data.gyro_dps);
+        sensor_remap_axes(cal_data.mag_axes, BOARD_AXIS_ALIGNMENT, cal_data.mag_axes);
+
         sensor_update_flight_data(&cal_data);
 
         int64_t now_us = esp_timer_get_time();
@@ -298,7 +309,7 @@ void vImuHandlerTask(void *pvParameters) {
             gDegOffVert = attitude_ekf_get_tilt_deg();
         }
 
-        if (cycle == EKF_CAL_CYCLES) {
+        if (cycle == EKF_CAL_CYCLES && !sd_logger_started) {
             float bias_dps[3];
             attitude_ekf_get_gyro_bias_dps(bias_dps);
             ESP_LOGW(TAG, "EKF cal done. Gyro bias (dps): X=%.3f Y=%.3f Z=%.3f",
@@ -309,34 +320,42 @@ void vImuHandlerTask(void *pvParameters) {
             attitude_ekf_capture_mounting();
             ESP_LOGW(TAG, "Mounting offset captured.");
             can_telemetry_set_status_bit(CAN_TLM_FLAG_EKF_LOCKED, true);
+            vTaskResume( xSdLoggerHandle );
+            sd_logger_started = true;
         }
         cycle++;
 
         // After mounting capture, rotate calibrated accel and gyro into the
         // rocket body frame so logging, FSM, and CAN telemetry all see them
         // as if the PCB were mounted nose-up. No-op until cycle reaches
-        // EKF_CAL_CYCLES.
+        // EKF_CAL_CYCLES, and effectively a no-op when BOARD_AXIS_ALIGNMENT
+        // already maps to identity (since EKF then converges to identity).
         attitude_ekf_apply_mount(cal_data.accel_g, cal_data.accel_g);
         attitude_ekf_apply_mount(cal_data.gyro_dps, cal_data.gyro_dps);
 
-        if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
+        // Complementary filter predict step. Uses rocket-frame body Z accel
+        // (after remap + mount apply) as the vertical-axis input. Drift is
+        // bounded by sensor_velocity_correct() in the alt task.
+        sensor_velocity_predict(cal_data.accel_g[2], dt_s);
+
+        // Decimate to 10 Hz before pushing to SD logger queue
+        if (sd_logger_started) {
+            if (++decim_counter >= IMU_QUEUE_DECIMATE) {
+                msg.type = SENSOR_IMU;
+                msg.data.imu = cal_data;
+
+                if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
+                    ESP_LOGE(TAG, "Failed to send IMU data to queue");
+                }
+                decim_counter = 0;
+            }
+        }
+        //if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
             // ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
             //          cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
             //          cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
             //          cal_data.mag_axes[0], cal_data.mag_axes[1], cal_data.mag_axes[2]);
-            printData();
-        }
-
-        // Decimate to 10 Hz before pushing to SD logger queue
-        if (++decim_counter >= IMU_QUEUE_DECIMATE) {
-            msg.type = SENSOR_IMU;
-            msg.data.imu = cal_data;
-
-            if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
-                ESP_LOGE(TAG, "Failed to send IMU data to queue");
-            }
-            decim_counter = 0;
-        }
+        //}
 
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
@@ -367,6 +386,10 @@ void vAltHandlerTask(void *pvParameters) {
                 sensor_track_ground_pressure(alt_data.pressure);
             }
             alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
+            // Complementary-filter correct step: pull gVerticalVelocity_fps
+            // toward the baro-derived velocity (Δalt/Δt). Bounds the drift
+            // accumulated by sensor_velocity_predict() at 100 Hz.
+            sensor_velocity_correct(alt_data.altitude);
         }
         else {
             ESP_LOGE("PRESS", "Failed to obtain Altitude data");
@@ -376,21 +399,22 @@ void vAltHandlerTask(void *pvParameters) {
         // Convert to F
         alt_data.temp = alt_data.temp * 1.8 + 32.0;
 
-        if(++alt_print_counter >= 100) {
-            //ESP_LOGI("PRESS", "Pressure (hpa): %.2f, Altitude (ft): %.2f Temp (F): %.2f", alt_data.pressure, alt_data.altitude, alt_data.temp);
-            alt_print_counter = 0;
-        }
-        // Encapsulate data
         // Decimate to 10 Hz before pushing to SD logger queue
-        if (++decim_counter >= IMU_QUEUE_DECIMATE) {
-            msg.type = SENSOR_ALT;
-            msg.data.alt = alt_data;
+        if (sd_logger_started) {
+            if (++decim_counter >= IMU_QUEUE_DECIMATE) {
+                msg.type = SENSOR_ALT;
+                msg.data.alt = alt_data;
 
-            if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
-                ESP_LOGE(TAG, "Failed to send Press data to queue");
+                if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
+                    ESP_LOGE(TAG, "Failed to send Press data to queue");
+                }
+                decim_counter = 0;
             }
-            decim_counter = 0;
         }
+        // if(++alt_print_counter >= 100) {
+            //ESP_LOGI("PRESS", "Pressure (hpa): %.2f, Altitude (ft): %.2f Temp (F): %.2f", alt_data.pressure, alt_data.altitude, alt_data.temp);
+        //    alt_print_counter = 0;
+        // }
     
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
@@ -400,6 +424,8 @@ void vSdLoggerTask(void *pvParameters) {
     SensorMessage_t msg;
     LogSensorRecord_t record;
     attitude_t att;
+    uint8_t print_counter = 0;
+    static bool loggingFlag;
 
     while (1) {
         // Block task until packet is sent from IMU/Alt task
@@ -410,9 +436,9 @@ void vSdLoggerTask(void *pvParameters) {
                     record.accel.y = msg.data.imu.accel_g[1];
                     record.accel.z = msg.data.imu.accel_g[2];
 
-                    record.accel.x = msg.data.imu.gyro_dps[0];
-                    record.accel.y = msg.data.imu.gyro_dps[1];
-                    record.accel.z = msg.data.imu.gyro_dps[2];
+                    // record.gyro.x = msg.data.imu.gyro_dps[0];
+                    // record.gyro.y = msg.data.imu.gyro_dps[1];
+                    // record.gyro.z = msg.data.imu.gyro_dps[2];
                     break;
                 case SENSOR_ALT:
                     record.baro = msg.data.alt;
@@ -421,19 +447,42 @@ void vSdLoggerTask(void *pvParameters) {
 
             attitude_ekf_get_attitude(&att);
             record.timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
-            record.attitude = att;
+            record.orientation = att;
+            record.gVertVelocity = gVerticalVelocity_fps;
+            record.gTotalAcc = gTotalAcc;
             record.pyroStatus = gPyroStatus;
             record.flightState = getCurrentFlightState();
 
-            // Use a mutex to lock the write SD card task when calling frequently
-            if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-                if (write_packet(record) == ESP_OK) {
-                    //ESP_LOGI(TAG, "Wrote packet to SD.");
-                }
-                else {
-                    // ESP_LOGE(TAG, "Failed to write packet to SD.");
-                }
+            if (record.flightState == STATE_DISARM && loggingFlag) {
+                ESP_LOGI(TAG, "Rocket Landed. Stopping live telemetry logging...");
+                loggingFlag = false;
+                sd_safe_unmount();
+            }
+            loggingFlag = sd_logger_is_active();
+
+            // Skip writing to sd if logging disabled
+            if (loggingFlag) {
+                // Use a mutex to lock the write SD card task when calling frequently
+                if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+                    if (write_packet(record) == ESP_OK) {
+                        //ESP_LOGI(TAG, "Wrote packet to SD.");
+                    }
+                    else {
+                        // ESP_LOGE(TAG, "Failed to write packet to SD.");
+                    }
                 xSemaphoreGive(xSemaphore);
+                }   
+            }
+            
+
+            if (print_counter++ % 10 == 0) {
+                ESP_LOGI("AHRS", "\tYaw: %d deg\tPitch: %d deg\tRoll: %d deg\tTilt: %d deg",
+                (int)att.yaw_deg, (int)att.pitch_deg, (int)att.roll_deg, (int)att.tilt_deg);
+                ESP_LOGI("IMU", "Accel: \tX: %.1f,\tY: %.1f,\tZ: %.1f", gAccel[0], gAccel[1], gAccel[2]);
+                ESP_LOGI("IMU", "\tTotal Accel: %.1f g", gTotalAcc);
+                ESP_LOGI("BARO", "\tPressure: %.1f hPa, \tTemp: %.1f F", record.baro.pressure, record.baro.temp);
+                ESP_LOGI("BARO", "\tAltitude: %.1f ft", record.baro.altitude);
+                ESP_LOGI("FUSION", "\tVertical Velocity: %.1f ft/s", gVerticalVelocity_fps);
             }
         }
     }
@@ -446,17 +495,20 @@ void printData() {
     //fusedData_p->attitude = att;
     
     ESP_LOGI("AHRS",
-    "\n\tYaw:   %d deg"
-    "\n\tPitch: %d deg"
-    "\n\tRoll:  %d deg"
-    "\n\tTilt:  %d deg",
+    "\tYaw:   %d deg"
+    "\tPitch: %d deg"
+    "\tRoll:  %d deg"
+    "\tTilt:  %d deg",
+ //   "\n\tQuat:  [%d. %d, %d, %d]",
     (int)att.yaw_deg,
     (int)att.pitch_deg,
     (int)att.roll_deg,
-    (int)att.tilt_deg);
+    (int)att.tilt_deg
+ //   (int)att.quat[0], (int)att.quat[1], (int)att.quat[2], (int)att.quat[3]
+    );
     
     ESP_LOGI("IMU", "Acceleration: X: %.1f, Y: %.1f, Z: %.1f", gAccel[0], gAccel[1], gAccel[2]);
     ESP_LOGI("IMU", "Total Acceleration: %.1f g", gTotalAcc);
-    ESP_LOGI("IMU", "Vertical velocity: %.1f", gVerticalVelocity_fps);
+    ESP_LOGI("FUSION", "Vertical velocity: %.1f ft/s", gVerticalVelocity_fps);
             
 }

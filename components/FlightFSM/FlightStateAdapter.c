@@ -62,7 +62,7 @@ extern void can_telemetry_event(uint8_t event_type, uint8_t event_data);
 /* Extern data streams (defined in sensor_mgr.c) */
 extern float gAltitude;
 extern float gTotalAcc;
-extern float gDegOffVert;
+extern float gVerticalVelocity_fps;
 
 /* Extern tick function (defined in sensor_mgr.c) */
 extern uint32_t sensor_get_tick_ms(void);
@@ -86,15 +86,15 @@ uint32_t transDelay = UINT32_MAX;
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
 #define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    1000    // Min apogee altitude needed for drogue to be deployed
-#define MAIN_DEPLOY_ALTITUDE    1500    // End of drogue descent (ft)
-//#define MAIN_DEPLOY_ACC_THRESH_G   10 // Threshold acceleration for failsafe main deployment
+#define MAIN_DEPLOY_ALT_FT      1500    // Main deployment altitude threshold
+#define MAIN_BKP_DEPLOY_ALT_FT  1300    // Main backup deployment altitude threshold
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
-#define LANDED_ALT_THRESHOLD	  3.0		  // Change in altitude (ft) to be considered landed
-#define LANDED_SAMPLES_REQ		  1		    // 1 consecutive stable samples
+#define LANDED_ALT_THRESH_FT 	  3.0		  // Change in altitude (ft) to be considered landed
+#define LANDED_SAMPLES_REQ		  10		    // consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
 #define DROGUE_SEQ_DELAY_MS     1000    // Delay between DRG1 and DRG2 firing
 #define LANDED_COOLDOWN_MS		  10000	  // 10 sec
+#define LANDED_VEL_THRESH_FPS   8       // < 8 feet / s
 #define MACH_LOCK_TIME_MS       4000    // ms - must cover transonic phase (~Mach 0.8-1.2)
 #define APOGEE_CONSEC_SAMPLES   3       // consecutive descending samples before apogee confirm
 
@@ -182,7 +182,7 @@ bool risingExitTransition(void)
   // Look for apogee — require consecutive descending samples to filter transonic noise
   if(uwTick >= transDelay)
   {
-    if(gAltitude < prevAlt) // Check for negative altitude -> rocket falling
+    if(gAltitude < prevAlt || gVerticalVelocity_fps < 0) // Check for negative altitude -> rocket falling
     {
       descendingSamples++;
       if(descendingSamples >= APOGEE_CONSEC_SAMPLES) // Check multiple samples
@@ -207,38 +207,23 @@ bool risingExitTransition(void)
 bool apogeeExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
-	float currentVel = (gAltitude - prevAlt) / (APOGEE_SAMPLE_PERIOD_MS * 0.001f); // ft / s
 
 	// Apogee detection logic
 	if (uwTick >= transDelay) {
-		if (currentVel <= 0 && !apogeeConfirmed)
-		{
-			// Negative velocity confirmed — start cooldown before firing
-			transDelay = uwTick + APOGEE_COOLDOWN_MS;
-			apogeeConfirmed = 1;
-		}
-		else if (apogeeConfirmed && !drg1Fired)
+		if (!drg1Fired)
 		{
 			// Cooldown elapsed — fire drogue 1, then arm delay for drogue 2
-			if (xPyroTaskHandle != NULL)
-				xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
+			xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
 			drg1Fired = 1;
 			transDelay = uwTick + DROGUE_SEQ_DELAY_MS;
 		}
-		else if (drg1Fired)
+		else
 		{
 			// Sequence delay elapsed — fire drogue 2
-			if (xPyroTaskHandle != NULL)
-				xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
+			xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
         
 			prevAlt = gAltitude; // reset for descent tracking
 			return true;
-		}
-		else
-		{
-			// Not yet confirmed — keep sampling
-			prevAlt = gAltitude;
-			transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS;
 		}
 	}
 	return false;
@@ -246,14 +231,16 @@ bool apogeeExitTransition(void)
 
 bool drogueDescentExitTransition(void)
 {
-  if(gAltitude < (MAIN_DEPLOY_ALTITUDE + altOffset))
+  if(gAltitude < MAIN_DEPLOY_ALT_FT)
   {
     // Fire main charge (TD2 ejection)
-    if (xPyroTaskHandle != NULL)
-    {
-      xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
-      //xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
-    }
+    xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
+  }
+
+  // backup main fire
+  if(gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
+  {
+    xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
     transDelay = sensor_get_tick_ms();
     return true;
   }
@@ -266,13 +253,16 @@ bool mainDescentExitTransition(void)
 	// Calculate altitude stability
 	float deltaAlt = fabs(gAltitude - prevAlt);
 
-  // Look for apogee
   if(uwTick >= transDelay)
   {
-    if (deltaAlt < LANDED_ALT_THRESHOLD)
+    if (deltaAlt < LANDED_ALT_THRESH_FT || fabs(gVerticalVelocity_fps) < LANDED_VEL_THRESH_FPS)
 	  {
     	landedSamples++;
-    	if (landedSamples > LANDED_SAMPLES_REQ) return true;
+    	if (landedSamples > LANDED_SAMPLES_REQ)
+      {
+        transDelay = uwTick;
+        return true;
+      }
 	  }
     else
     {

@@ -81,6 +81,44 @@ typedef struct {
 } Mag_Axes_t;
 
 /**
+ * Board-to-rocket axis alignment. Mirrors the FusionRemap enum naming.
+ * Letters describe how the SENSOR axes map to the BODY (rocket) axes:
+ *   PXPYPZ = sensor +X→body +X, +Y→body +Y, +Z→body +Z (no remap)
+ *   PYPZPX = sensor +Y→body +X, +Z→body +Y, +X→body +Z
+ *   PZNYPX = sensor +Z→body +X, -Y→body +Y, +X→body +Z
+ * etc.
+ * The 24 entries cover every right-handed 90° axis-aligned rotation.
+ * Pick the one that makes gravity (1 g pointing down on the pad) read on
+ * body +Z when the rocket sits nose-up — that's the correct alignment.
+ */
+typedef enum {
+    AXIS_ALIGN_PXPYPZ,  AXIS_ALIGN_PXPZNY,  AXIS_ALIGN_PXNZPY,  AXIS_ALIGN_PXNYNZ,
+    AXIS_ALIGN_PYPXNZ,  AXIS_ALIGN_PYPZPX,  AXIS_ALIGN_PYNZNX,  AXIS_ALIGN_PYNXPZ,
+    AXIS_ALIGN_PZPXPY,  AXIS_ALIGN_PZPYNX,  AXIS_ALIGN_PZNYPX,  AXIS_ALIGN_PZNXNY,
+    AXIS_ALIGN_NZPXNY,  AXIS_ALIGN_NZPYPX,  AXIS_ALIGN_NZNYNX,  AXIS_ALIGN_NZNXPY,
+    AXIS_ALIGN_NYPXPZ,  AXIS_ALIGN_NYPZNX,  AXIS_ALIGN_NYNZPX,  AXIS_ALIGN_NYNXNZ,
+    AXIS_ALIGN_NXPYNZ,  AXIS_ALIGN_NXPZPY,  AXIS_ALIGN_NXNZNY,  AXIS_ALIGN_NXNYPZ,
+} sensor_axis_align_t;
+
+// Rocket mounting alignment for THIS board. Edit this one constant if the
+// PCB orientation changes. Default is identity (sensor frame = rocket frame).
+#ifndef BOARD_AXIS_ALIGNMENT
+#define BOARD_AXIS_ALIGNMENT AXIS_ALIGN_PXPYPZ
+#endif
+
+// Permute and sign-flip a 3-vector according to the alignment. in/out may alias.
+void sensor_remap_axes(const float in[3], sensor_axis_align_t align, float out[3]);
+
+// Complementary filter on vertical velocity.
+// Predict: integrate (vert_accel_g - 1g) into gVerticalVelocity_fps. Call
+// from the 100 Hz IMU task with body-frame Z accel after axis remap.
+void sensor_velocity_predict(float vert_accel_g, float dt_s);
+
+// Correct: pull gVerticalVelocity_fps toward (Δalt/Δt) computed from
+// consecutive baro samples. Call from the alt task after sensor_get_altitude.
+void sensor_velocity_correct(float new_alt_ft);
+
+/**
  * Run startup gyro-bias calibration by averaging samples while stationary.
  * Blocks for ~5 seconds. Must be called before tasks start.
  * Accel bias is intentionally not estimated here (orientation-dependent and
