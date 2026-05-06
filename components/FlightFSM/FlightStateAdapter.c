@@ -75,6 +75,8 @@ float prevVel = 0;
 float altOffset = 0;
 uint8_t apogeeConfirmed = 0;
 uint8_t drg1Fired = 0;
+uint8_t main1Fired = 0;
+uint8_t main2Fired = 0;
 uint8_t descendingSamples = 0;
 uint8_t landedSamples = 0;
 uint32_t transDelay = UINT32_MAX;
@@ -231,16 +233,19 @@ bool apogeeExitTransition(void)
 
 bool drogueDescentExitTransition(void)
 {
-  if(gAltitude < MAIN_DEPLOY_ALT_FT)
+  // Latch each main charge so it fires exactly once. Without latching the
+  // FSM re-notifies every 10 ms tick while alt is below threshold, which
+  // backs up the pyro task's notification queue.
+  if(!main1Fired && gAltitude < MAIN_DEPLOY_ALT_FT)
   {
-    // Fire main charge (TD2 ejection)
     xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
+    main1Fired = 1;
   }
 
-  // backup main fire
-  if(gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
+  if(!main2Fired && gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
   {
-    xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
+    xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
+    main2Fired = 1;
     transDelay = sensor_get_tick_ms();
     return true;
   }

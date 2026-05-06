@@ -274,39 +274,29 @@ extern uint8_t gPyroStatus;
 
 void Pyro_Task( board_handle_t *handle )
 {
-    // Set up varaibles controlling pyro channels
     uint32_t wakeNotification = 0;
-    uint8_t requestedChannel;
 
     for(;;)
     {
-        // Wait for event request
+        // Wait for event request. ULONG_MAX clear-on-exit means every pending
+        // bit accumulated during the previous firing run lands here at once.
         xTaskNotifyWait(0x00, ULONG_MAX, &wakeNotification, portMAX_DELAY);
 
-        // Get GPIO_NUM from handle and requested flag
-        requestedChannel = pyro_channel_max;
+        // Fire every set bit, in channel order. Lower channels finish before
+        // higher ones — DRG1 before DRG2, MAIN1 before MAIN2.
         for(uint8_t chan = 0; chan < pyro_channel_max; chan++)
         {
-            if((wakeNotification >> chan) & 0x0001)
-            {
-                requestedChannel = chan;
-            }
-        }
+            if(((wakeNotification >> chan) & 0x0001) == 0) continue;
 
-        if(requestedChannel < pyro_channel_max)
-        {
-            // loop for number of retries configured
             for(uint8_t i = 0; i < PYRO_MAX_ATTEMPTS; i++)
             {
-                // Turn on channel for burst, then turn off
-                gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 1); // on
+                gpio_set_level((*handle)->pyro_gpio_nums[chan], 1);
                 vTaskDelay(pdMS_TO_TICKS(PYRO_DRIVE_TIME));
-                gpio_set_level((*handle)->pyro_gpio_nums[requestedChannel], 0); // off
-                
-                ESP_LOGE(TAG, "Pyro ejection for %s!", pyro_channel_names[requestedChannel]);
-                gPyroStatus |= (1 << requestedChannel);
+                gpio_set_level((*handle)->pyro_gpio_nums[chan], 0);
 
-                // Cool off between firing to protect hardware for ematch short
+                ESP_LOGE(TAG, "Pyro ejection for %s!", pyro_channel_names[chan]);
+                gPyroStatus |= (1 << chan);
+
                 vTaskDelay(pdMS_TO_TICKS(PYRO_COOL_TIME));
             }
         }

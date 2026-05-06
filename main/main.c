@@ -25,14 +25,12 @@
 #include "nvs_flash.h"
 
 #define UTDMALLOC(n, els)              (els *) malloc((n)*sizeof(els))
-#define MIN_STACK_SIZE configMINIMAL_STACK_SIZE * 2 // original minimum causes stack overflow
+#define MIN_STACK_SIZE configMINIMAL_STACK_SIZE // original minimum causes stack overflow
 #define SENSOR_DELAY_MS 10 // 1/10ms = 100Hz
-#define LOGGING_DELAY_MS 100 // ms
+#define LOGGING_DELAY_MS 100 // ms (10 Hz SD log cadence)
 
 // EKF on-pad calibration phase: 5 s at 100 Hz
 #define EKF_CAL_CYCLES 500
-// IMU task queues to SD logger at 10 Hz (every 10th cycle of 100 Hz IMU loop)
-#define IMU_QUEUE_DECIMATE 10
 
 // Uncomment to run pyro bench test on boot (DO NOT fly with this enabled)
 //#define PYRO_BENCH_TEST
@@ -56,12 +54,14 @@ void vAltHandlerTask(void *pvParameters);
 void vSdLoggerTask(void *pvParameters);
 void vFsmTask(void *pvParameters);
 
-static QueueHandle_t imu_queue = NULL, alt_queue = NULL, sensor_queue = NULL;
 SemaphoreHandle_t xSemaphore;
 TaskHandle_t xPyroTaskHandle = NULL, xLEDTaskHandle = NULL;
 TaskHandle_t xSdLoggerHandle = NULL;
 
 FusedPacket_ptr fusedData_p;
+// Spinlock guarding writes/reads of *fusedData_p. Held only for struct-field
+// copies (microseconds), never across SD I/O.
+static portMUX_TYPE g_fused_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool sd_logger_started = false;
 
@@ -115,8 +115,6 @@ void app_main(void) {
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 #endif
 
-    //xTaskCreate(can_tx_task, "can_tx_task", 2048, NULL, 5, NULL);
-
     // Load mag cal from NVS (persisted from a previous bench session).
     load_mag_cal();
 
@@ -153,12 +151,7 @@ void app_main(void) {
         can_telemetry_event(EVT_SD_FAIL, 0);
     }
     
-    // Queue inits
-    imu_queue = xQueueCreate(10, sizeof(imu_calibrated_t));
-    alt_queue = xQueueCreate(10, sizeof(AltData_t));
-    sensor_queue = xQueueCreate(20, sizeof(SensorMessage_t));
-
-    // Semaphore init
+    // Semaphore init (guards FATFS calls in the SD logger task)
     xSemaphore = xSemaphoreCreateMutex();
 
     // RTOS Task creation
@@ -167,22 +160,23 @@ void app_main(void) {
     TaskHandle_t xAltTaskHandle;
     TaskHandle_t xFsmTaskHandle;
 
-    // SD Logger;
     task_ret = xTaskCreate(vSdLoggerTask,
                             "SD Logger",
-                            8 * 1024,
+                            6 * MIN_STACK_SIZE,
                             NULL,
                             1,
                             &xSdLoggerHandle);
     CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
 
+    // Suspend task until EK3 is initialized
     vTaskSuspend( xSdLoggerHandle );
+
     // IMU + EKF + Mag (all sensor fusion in one 100 Hz task).
     // EKF allocates several dspm::Mat scratch matrices per Process()/Update*()
     // call; 8 KB gives comfortable headroom over the ~3 KB peak observed.
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU+EKF",
-                           8 * 1024,
+                           4 * MIN_STACK_SIZE,
                            (void*) mini_fc_handle,
                            2,
                            &xImuTaskHandle);
@@ -190,22 +184,21 @@ void app_main(void) {
     // Pressure
     task_ret = xTaskCreate(vAltHandlerTask,
                            "Absolute Pressure Data Collection",
-                           4 * 1024,
+                           3 * MIN_STACK_SIZE,
                            (void*) mini_fc_handle->lps22df_handle,
                            2,
                            &xAltTaskHandle);
     // Flight State Machine
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
-                           4 * 1024,
+                           3 * MIN_STACK_SIZE,
                            NULL,
-                           2,  // higher priority than sensor tasks
+                           2,  
                            &xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
-    // LED
-    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 1 * 1024, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
-    // Pyro
-    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 1 * 1024, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
+
+    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
+    xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
 
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait for everything to settle (TODO event based wait)
 
@@ -245,21 +238,6 @@ static void init_nvs_flash_memory(void)
     ESP_ERROR_CHECK( err );
 }
 
-void load_mag_cal() {
-    if (mag_cal_load_nvs(&mag_cal) != ESP_OK || !mag_cal.is_calibrated) {
-        ESP_LOGW(TAG, "Mag cal not in NVS. Flight will run with raw mag; EKF will absorb slowly.");
-        memset(&mag_cal, 0, sizeof(mag_cal));
-        // identity soft-iron so sensor_update_mag passthrough is reasonable
-        mag_cal.soft_iron[0][0] = 1.0f;
-        mag_cal.soft_iron[1][1] = 1.0f;
-        mag_cal.soft_iron[2][2] = 1.0f;
-        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, false);
-    } else {
-        ESP_LOGI(TAG, "Mag cal loaded from NVS.");
-        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, true);
-    }
-}
-
 void vImuHandlerTask(void *pvParameters) {
     board_handle_t board = (board_handle_t)pvParameters;
     LSM6DSV80X_Object_t *imu = board->lsm6dsv80x_handle;
@@ -268,10 +246,7 @@ void vImuHandlerTask(void *pvParameters) {
     LSM6DSV80X_Axes_t accel_axes, gyro_axes;
     IIS2MDC_Axes_t mag_axes;
     imu_calibrated_t cal_data;
-    SensorMessage_t msg;
 
-    int print_counter = 0;
-    int decim_counter = 0;
     int cycle = 0;
     int64_t prev_us = esp_timer_get_time();
 
@@ -338,24 +313,25 @@ void vImuHandlerTask(void *pvParameters) {
         // bounded by sensor_velocity_correct() in the alt task.
         sensor_velocity_predict(cal_data.accel_g[2], dt_s);
 
-        // Decimate to 10 Hz before pushing to SD logger queue
-        if (sd_logger_started) {
-            if (++decim_counter >= IMU_QUEUE_DECIMATE) {
-                msg.type = SENSOR_IMU;
-                msg.data.imu = cal_data;
-
-                if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
-                    ESP_LOGE(TAG, "Failed to send IMU data to queue");
-                }
-                decim_counter = 0;
-            }
-        }
-        //if (++print_counter % 100 == 0) { // 1 Hz at 100 Hz task rate
-            // ESP_LOGI("IMU", "Cal  accel(g)=[%.3f,%.3f,%.3f]  gyro(dps)=[%.3f,%.3f,%.3f]  mag=[%.1f,%.1f,%.1f]",
-            //          cal_data.accel_g[0], cal_data.accel_g[1], cal_data.accel_g[2],
-            //          cal_data.gyro_dps[0], cal_data.gyro_dps[1], cal_data.gyro_dps[2],
-            //          cal_data.mag_axes[0], cal_data.mag_axes[1], cal_data.mag_axes[2]);
-        //}
+        // Publish IMU-side fields into FusedPacket. Both producer tasks share
+        // the spinlock; the SD logger snapshots the whole struct atomically.
+        attitude_t att;
+        attitude_ekf_get_attitude(&att);
+        portENTER_CRITICAL(&g_fused_mux);
+        fusedData_p->currTick_ms       = sensor_get_tick_ms();
+        fusedData_p->currAcc.x         = cal_data.accel_g[0];
+        fusedData_p->currAcc.y         = cal_data.accel_g[1];
+        fusedData_p->currAcc.z         = cal_data.accel_g[2];
+        fusedData_p->currGyro.x        = cal_data.gyro_dps[0];
+        fusedData_p->currGyro.y        = cal_data.gyro_dps[1];
+        fusedData_p->currGyro.z        = cal_data.gyro_dps[2];
+        fusedData_p->currMag.x         = cal_data.mag_axes[0];
+        fusedData_p->currMag.y         = cal_data.mag_axes[1];
+        fusedData_p->currMag.z         = cal_data.mag_axes[2];
+        fusedData_p->attitude          = att;
+        fusedData_p->gTotalAcc         = gTotalAcc;
+        fusedData_p->gVerticalVelocity = gVerticalVelocity_fps;
+        portEXIT_CRITICAL(&g_fused_mux);
 
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
@@ -372,9 +348,6 @@ void vFsmTask(void *pvParameters) {
 void vAltHandlerTask(void *pvParameters) {
     LPS22DF_Object_t* alt = (LPS22DF_Object_t*)pvParameters;
     AltData_t alt_data;
-    SensorMessage_t msg;
-    int alt_print_counter = 0;
-    int decim_counter = 0;
 
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
@@ -399,116 +372,88 @@ void vAltHandlerTask(void *pvParameters) {
         // Convert to F
         alt_data.temp = alt_data.temp * 1.8 + 32.0;
 
-        // Decimate to 10 Hz before pushing to SD logger queue
-        if (sd_logger_started) {
-            if (++decim_counter >= IMU_QUEUE_DECIMATE) {
-                msg.type = SENSOR_ALT;
-                msg.data.alt = alt_data;
+        // Publish baro-side fields into FusedPacket.
+        portENTER_CRITICAL(&g_fused_mux);
+        fusedData_p->currPress = alt_data.pressure;
+        fusedData_p->currTempF = alt_data.temp;
+        fusedData_p->gAltitude = alt_data.altitude;
+        portEXIT_CRITICAL(&g_fused_mux);
 
-                if (xQueueSend(sensor_queue, (void*) &msg, pdMS_TO_TICKS(10)) != pdPASS) {
-                    ESP_LOGE(TAG, "Failed to send Press data to queue");
-                }
-                decim_counter = 0;
-            }
-        }
-        // if(++alt_print_counter >= 100) {
-            //ESP_LOGI("PRESS", "Pressure (hpa): %.2f, Altitude (ft): %.2f Temp (F): %.2f", alt_data.pressure, alt_data.altitude, alt_data.temp);
-        //    alt_print_counter = 0;
-        // }
-    
         vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));
     }
 }
 
 void vSdLoggerTask(void *pvParameters) {
-    SensorMessage_t msg;
     LogSensorRecord_t record;
-    attitude_t att;
+    FusedPacket_t snap;
     uint8_t print_counter = 0;
     static bool loggingFlag;
 
     while (1) {
-        // Block task until packet is sent from IMU/Alt task
-        if (xQueueReceive(sensor_queue, &msg, portMAX_DELAY)) {
-            switch (msg.type) {
-                case SENSOR_IMU:
-                    record.accel.x = msg.data.imu.accel_g[0];
-                    record.accel.y = msg.data.imu.accel_g[1];
-                    record.accel.z = msg.data.imu.accel_g[2];
+        vTaskDelay(pdMS_TO_TICKS(LOGGING_DELAY_MS));
 
-                    // record.gyro.x = msg.data.imu.gyro_dps[0];
-                    // record.gyro.y = msg.data.imu.gyro_dps[1];
-                    // record.gyro.z = msg.data.imu.gyro_dps[2];
-                    break;
-                case SENSOR_ALT:
-                    record.baro = msg.data.alt;
-                    break;
-            }
+        fused_snapshot(&snap);
 
-            attitude_ekf_get_attitude(&att);
-            record.timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
-            record.orientation = att;
-            record.gVertVelocity = gVerticalVelocity_fps;
-            record.gTotalAcc = gTotalAcc;
-            record.pyroStatus = gPyroStatus;
-            record.flightState = getCurrentFlightState();
+        record.timestamp_s   = snap.currTick_ms / 1000.0f;
+        record.accel         = snap.currAcc;
+        record.baro.pressure = snap.currPress;
+        record.baro.temp     = snap.currTempF;
+        record.baro.altitude = snap.gAltitude;
+        record.orientation   = snap.attitude;
+        record.gTotalAcc     = snap.gTotalAcc;
+        record.gVertVelocity = snap.gVerticalVelocity;
+        record.flightState   = getCurrentFlightState();
+        record.pyroStatus    = gPyroStatus;
 
-            if (record.flightState == STATE_DISARM && loggingFlag) {
-                ESP_LOGI(TAG, "Rocket Landed. Stopping live telemetry logging...");
-                loggingFlag = false;
-                sd_safe_unmount();
-            }
-            loggingFlag = sd_logger_is_active();
+        if (record.flightState == STATE_DISARM && loggingFlag) {
+            ESP_LOGI(TAG, "Rocket Landed. Stopping live telemetry logging...");
+            loggingFlag = false;
+            sd_safe_unmount();
+        }
+        loggingFlag = sd_logger_is_active();
 
-            // Skip writing to sd if logging disabled
-            if (loggingFlag) {
-                // Use a mutex to lock the write SD card task when calling frequently
-                if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
-                    if (write_packet(record) == ESP_OK) {
-                        //ESP_LOGI(TAG, "Wrote packet to SD.");
-                    }
-                    else {
-                        // ESP_LOGE(TAG, "Failed to write packet to SD.");
-                    }
+        if (loggingFlag) {
+            if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {
+                write_packet(record);
                 xSemaphoreGive(xSemaphore);
-                }   
             }
-            
+        }
 
-            if (print_counter++ % 10 == 0) {
-                ESP_LOGI("AHRS", "\tYaw: %d deg\tPitch: %d deg\tRoll: %d deg\tTilt: %d deg",
-                (int)att.yaw_deg, (int)att.pitch_deg, (int)att.roll_deg, (int)att.tilt_deg);
-                ESP_LOGI("IMU", "Accel: \tX: %.1f,\tY: %.1f,\tZ: %.1f", gAccel[0], gAccel[1], gAccel[2]);
-                ESP_LOGI("IMU", "\tTotal Accel: %.1f g", gTotalAcc);
-                ESP_LOGI("BARO", "\tPressure: %.1f hPa, \tTemp: %.1f F", record.baro.pressure, record.baro.temp);
-                ESP_LOGI("BARO", "\tAltitude: %.1f ft", record.baro.altitude);
-                ESP_LOGI("FUSION", "\tVertical Velocity: %.1f ft/s", gVerticalVelocity_fps);
-            }
+        if (print_counter++ % 100 == 0) {
+            ESP_LOGI("AHRS", "\tYaw: %d deg\tPitch: %d deg\tRoll: %d deg\tTilt: %d deg",
+                (int)snap.attitude.yaw_deg, (int)snap.attitude.pitch_deg,
+                (int)snap.attitude.roll_deg, (int)snap.attitude.tilt_deg);
+            ESP_LOGI("IMU", "Accel: \tX: %.1f,\tY: %.1f,\tZ: %.1f",
+                snap.currAcc.x, snap.currAcc.y, snap.currAcc.z);
+            ESP_LOGI("IMU", "\tTotal Accel: %.1f g", snap.gTotalAcc);
+            ESP_LOGI("BARO", "\tPressure: %.1f hPa, \tTemp: %.1f F",
+                snap.currPress, snap.currTempF);
+            ESP_LOGI("BARO", "\tAltitude: %.1f ft", snap.gAltitude);
+            ESP_LOGI("FUSION", "\tVertical Velocity: %.1f ft/s", snap.gVerticalVelocity);
         }
     }
 }
 
-void printData() {
-    attitude_t att;
-    attitude_ekf_get_attitude(&att);
+// Atomic snapshot of the fused packet. Both producer tasks write
+// under the same spinlock, so this copy is a coherent mix of the
+// most recent IMU and baro samples.
+static inline void fused_snapshot(FusedPacket_t *out) {
+    portENTER_CRITICAL(&g_fused_mux);
+    *out = *fusedData_p;
+    portEXIT_CRITICAL(&g_fused_mux);
+}
 
-    //fusedData_p->attitude = att;
-    
-    ESP_LOGI("AHRS",
-    "\tYaw:   %d deg"
-    "\tPitch: %d deg"
-    "\tRoll:  %d deg"
-    "\tTilt:  %d deg",
- //   "\n\tQuat:  [%d. %d, %d, %d]",
-    (int)att.yaw_deg,
-    (int)att.pitch_deg,
-    (int)att.roll_deg,
-    (int)att.tilt_deg
- //   (int)att.quat[0], (int)att.quat[1], (int)att.quat[2], (int)att.quat[3]
-    );
-    
-    ESP_LOGI("IMU", "Acceleration: X: %.1f, Y: %.1f, Z: %.1f", gAccel[0], gAccel[1], gAccel[2]);
-    ESP_LOGI("IMU", "Total Acceleration: %.1f g", gTotalAcc);
-    ESP_LOGI("FUSION", "Vertical velocity: %.1f ft/s", gVerticalVelocity_fps);
-            
+void load_mag_cal() {
+    if (mag_cal_load_nvs(&mag_cal) != ESP_OK || !mag_cal.is_calibrated) {
+        ESP_LOGW(TAG, "Mag cal not in NVS. Flight will run with raw mag; EKF will absorb slowly.");
+        memset(&mag_cal, 0, sizeof(mag_cal));
+        // identity soft-iron so sensor_update_mag passthrough is reasonable
+        mag_cal.soft_iron[0][0] = 1.0f;
+        mag_cal.soft_iron[1][1] = 1.0f;
+        mag_cal.soft_iron[2][2] = 1.0f;
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, false);
+    } else {
+        ESP_LOGI(TAG, "Mag cal loaded from NVS.");
+        can_telemetry_set_status_bit(CAN_TLM_FLAG_MAG_CAL_VALID, true);
+    }
 }

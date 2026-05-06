@@ -49,19 +49,6 @@ typedef struct {
     float altitude;
 } AltData_t;
 
-typedef enum {
-    SENSOR_IMU,
-    SENSOR_ALT
-} SensorType_t;
-
-typedef struct {
-    SensorType_t type;
-    union {
-        imu_calibrated_t imu;
-        AltData_t alt;
-    } data;
-} SensorMessage_t;
-
 typedef struct {
     float x;
     float y;

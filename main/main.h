@@ -17,16 +17,16 @@ void app_main(void);
 // Produce a single, coherent view of the rocket’s filtered sensor data
 typedef struct {
     uint32_t currTick_ms;            // ms
-    Accel_Axes_t currAcc;       // mg
-    Gyro_Axes_t currGyro;      // mdps
-    Mag_Axes_t currMag;
-    float currPress;           // hPa
-    float currTempF;            // F
-    attitude_t attitude;             // Yaw, Pitch, Roll in degrees
-    float gAltitude;                // ft
-    float gVerticalVelocity;        // ft/s
-    float gTotalAcc;                // gravity magnititude
-    float gAccelVelocity;           // m/s^2, gravity removed
+    LSM6DSV80X_Axes_t currAcc;            // g (calibrated, body-frame)
+    LSM6DSV80X_Axes_t currGyro;            // dps (calibrated, body-frame)
+    IIS2MDC_Axes_t currMag;              // raw axes (no unit attached)
+    float currPress;                 // hPa
+    float currTempF;                 // F
+    attitude_t attitude;             // Yaw, Pitch, Roll, Tilt in degrees
+    float gAltitude;                 // ft (AGL)
+    float gVerticalVelocity;         // ft/s (+up)
+    float gTotalAcc;                 // g (gravity magnitude)
+    float gAccelVelocity;            // unused — reserved
 } FusedPacket_t, *FusedPacket_ptr;
 
 //extern FusedPacket_t sensorData;

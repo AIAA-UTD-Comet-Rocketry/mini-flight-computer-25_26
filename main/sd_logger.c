@@ -21,7 +21,7 @@ static uint32_t s_sd_write_count = 0;
 static const char *file_header = 
         "timestamp_s,"
         "acc_x,acc_y,acc_z,"
-        "totalAcc_g, vertVel_fps,"
+        "accel_g, velocity (f/s),"
         "yaw_deg, pitch_deg, roll_deg, tilt_deg,"
         "pressure_hpa,altitude_ft,temp_f,"
         "flight_state,"
