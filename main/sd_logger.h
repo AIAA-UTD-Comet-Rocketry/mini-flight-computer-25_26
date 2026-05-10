@@ -3,7 +3,6 @@
 
 #include "esp_err.h"
 #include "sensor_mgr.h"
-#include "attitude_ekf.h"
 
 typedef struct {
     imu_calibrated_t imu;
@@ -12,15 +11,17 @@ typedef struct {
 
 typedef struct __attribute__((packed)){
     float timestamp_s;         // sec
-    Accel_Axes_t accel;       // g
+    FusionVector accel;       // g
     AltData_t baro;
-    attitude_t orientation;
+    FusionEuler orientation;
     float gVertVelocity;            // ft/s
     float gTotalAcc;                // gravity magnitude
     float gAccelVelocity;           // ft/s^2, gravity removed
     uint8_t flightState;
     uint8_t pyroStatus;
 } LogSensorRecord_t; //used currently
+
+//extern LogSensorRecord_t record;
 
 typedef struct {
     // TODO: Capture flight transition state timestamp

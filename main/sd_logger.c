@@ -21,8 +21,8 @@ static uint32_t s_sd_write_count = 0;
 static const char *file_header = 
         "timestamp_s,"
         "acc_x,acc_y,acc_z,"
-        "accel_g, velocity (f/s),"
-        "yaw_deg, pitch_deg, roll_deg, tilt_deg,"
+        "accel_g, velocity_fps,"
+        "yaw_deg, pitch_deg, roll_deg,"
         "pressure_hpa,altitude_ft,temp_f,"
         "flight_state,"
         "drogue1,drogue2,main1,main2\n";
@@ -142,14 +142,14 @@ esp_err_t write_packet(LogSensorRecord_t record) {
         "%.1f,"
         "%.1f,%.1f,%.1f,"
         "%.1f,%.1f,"
-        "%.1f,%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,"
         "%.1f,%.1f,%.1f,"
         "%d,"
         "%c,%c,%c,%c\n",
         record.timestamp_s,
-        record.accel.x, record.accel.y, record.accel.z,
+        record.accel.axis.x, record.accel.axis.y, record.accel.axis.z,
         record.gTotalAcc, record.gVertVelocity,
-        record.orientation.yaw_deg, record.orientation.pitch_deg, record.orientation.roll_deg, record.orientation.tilt_deg,
+        record.orientation.angle.yaw, record.orientation.angle.pitch, record.orientation.angle.roll,
         record.baro.pressure, record.baro.altitude, record.baro.temp,
         record.flightState,
         (record.pyroStatus & (1U << 0)) ? 'Y' : 'N',

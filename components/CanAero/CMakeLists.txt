@@ -3,6 +3,5 @@ idf_component_register(SRCS "canaerospace.cpp"
                        INCLUDE_DIRS "include"
                        REQUIRES esp_driver_twai
                                 FlightFSM
-                                AttitudeEKF
                                 main
                        PRIV_REQUIRES driver freertos esp_timer)

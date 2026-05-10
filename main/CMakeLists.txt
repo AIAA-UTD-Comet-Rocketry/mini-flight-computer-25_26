@@ -1,4 +1,4 @@
-idf_component_register(SRCS "sd_logger.c" "sensor_mgr.c"
+idf_component_register(SRCS "imu_calibration.c" "sd_logger.c" "sensor_mgr.c"
                             "main.c"
                             "cmd_i2ctools.c"
                             "BSP.c"
@@ -10,4 +10,4 @@ idf_component_register(SRCS "sd_logger.c" "sensor_mgr.c"
                                 "esp_driver_ledc"
                                 "esp_driver_sdmmc"
                                 "esp_timer"
-                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X AttitudeEKF CanAero FlightFSM fatfs nvs_flash)
+                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X AttitudeEKF CanAero FlightFSM Fusion fatfs nvs_flash)

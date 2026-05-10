@@ -10,13 +10,13 @@
 #include <limits.h>
 
 #include "FlightFSM.h"
-#include "attitude_ekf.h"
 
 // ----- Externals from sensor_mgr / sd_logger / FlightFSM (sources of truth) -----
 // Forward-declared rather than included to avoid pulling main's headers
 // (sd_logger.h, sensor_mgr.h) into this component's REQUIRES graph.
 extern "C" {
     extern float gAccel[3];
+    extern float gOrient[3];
     extern float gAltitude;
     extern float gTotalAcc;
     extern float gVerticalVelocity_fps;
@@ -50,16 +50,16 @@ static inline int16_t clamp_i16(int32_t v) {
     return (int16_t)v;
 }
 
-static void build_packet(can_tlm_packet_t *pkt, const attitude_t *att, State fsm, uint8_t flags) {
+static void build_packet(can_tlm_packet_t *pkt, State fsm, uint8_t flags) {
     pkt->time_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     pkt->altitude_ft = clamp_i16((int32_t)lroundf(gAltitude));
     pkt->vert_vel_fps_x10 = clamp_i16((int32_t)lroundf(gVerticalVelocity_fps * 10.0f));
     pkt->accel_x_mg = clamp_i16((int32_t)lroundf(gAccel[0] * 1000.0f));
     pkt->accel_y_mg = clamp_i16((int32_t)lroundf(gAccel[1] * 1000.0f));
     pkt->accel_z_mg = clamp_i16((int32_t)lroundf(gAccel[2] * 1000.0f));
-    pkt->pitch_deg = clamp_i16((int32_t)lroundf(att->pitch_deg));
-    pkt->roll_deg  = clamp_i16((int32_t)lroundf(att->roll_deg));
-    pkt->yaw_deg   = clamp_i16((int32_t)lroundf(att->yaw_deg));
+    pkt->yaw_deg   = clamp_i16((int32_t)lroundf(gOrient[0]));
+    pkt->pitch_deg = clamp_i16((int32_t)lroundf(gOrient[1]));
+    pkt->roll_deg  = clamp_i16((int32_t)lroundf(gOrient[2]));
     pkt->fsm_state = (uint8_t)fsm;
     pkt->status_flags = flags;
     pkt->pyro_status = gPyroStatus;
@@ -75,9 +75,6 @@ static esp_err_t locked_tx_uchar4(uint16_t id, uint8_t a, uint8_t b, uint8_t c, 
 static void emit_status_set(void) {
     if (xSemaphoreTake(g_tx_mutex, pdMS_TO_TICKS(20)) != pdTRUE) return;
 
-    attitude_t att;
-    attitude_ekf_get_attitude(&att);
-
     State fsm = getCurrentFlightState();
     uint8_t flags = g_status_flags;
     if (sd_logger_is_active()) flags |=  CAN_TLM_FLAG_SD_LOGGING;
@@ -86,7 +83,7 @@ static void emit_status_set(void) {
     else                       flags &= ~CAN_TLM_FLAG_ARMED;
 
     can_tlm_packet_t pkt;
-    build_packet(&pkt, &att, fsm, flags);
+    build_packet(&pkt, fsm, flags);
 
     const uint8_t *bytes = (const uint8_t *)&pkt;
     for (int i = 0; i < CAN_TLM_PACKET_CHUNKS; ++i) {

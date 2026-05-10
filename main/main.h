@@ -8,7 +8,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 #include "sensor_mgr.h"
-#include "attitude_ekf.h"
+#include "Fusion.h"
 
 void app_main(void);
 
@@ -17,12 +17,13 @@ void app_main(void);
 // Produce a single, coherent view of the rocket’s filtered sensor data
 typedef struct {
     uint32_t currTick_ms;            // ms
-    LSM6DSV80X_Axes_t currAcc;            // g (calibrated, body-frame)
-    LSM6DSV80X_Axes_t currGyro;            // dps (calibrated, body-frame)
-    IIS2MDC_Axes_t currMag;              // raw axes (no unit attached)
+    FusionVector currAcc;            // g (calibrated, body-frame)
+    FusionVector currGyro;            // dps (calibrated, body-frame)
+    FusionVector currMag;              // raw axes (no unit attached)
     float currPress;                 // hPa
     float currTempF;                 // F
-    attitude_t attitude;             // Yaw, Pitch, Roll, Tilt in degrees
+    FusionEuler orientation;             // Yaw, Pitch, Roll, Tilt in degrees
+    FusionVector linearAcc;
     float gAltitude;                 // ft (AGL)
     float gVerticalVelocity;         // ft/s (+up)
     float gTotalAcc;                 // g (gravity magnitude)
