@@ -16,14 +16,15 @@
 #include "lps22df.h"
 #include "Fusion.h"
 
-static float GROUND_PRESSURE_HPA = 1013.25f; // default sea level pressure
-
 #define IMU_CAL_NUM_SAMPLES         500
 #define MAG_CAL_NUM_SAMPLES         500
 #define PRESS_CAL_NUM_SAMPLES       100
 #define IMU_CAL_SAMPLE_DELAY_MS     10
 #define MAG_CAL_SAMPLE_DELAY_MS     60
 #define PRESS_CAL_SAMPLE_DELAY_MS   10
+
+static float GROUND_PRESSURE_HPA = 1013.25f; // default sea level pressure
+static float gVerticalVelocity = 0.0f;   // complementary-filtered, ft/s
 
 /**
  * Board-to-rocket axis alignment.
@@ -64,15 +65,6 @@ typedef struct {
     float yaw;
 } Euler_Angles_t;
 
-// Complementary filter on vertical velocity.
-// Predict: integrate (vert_accel_g - 1g) into gVerticalVelocity_fps. Call
-// from the 100 Hz IMU task with body-frame Z accel after axis remap.
-void sensor_velocity_predict(float vert_accel_g, float dt_s);
-
-// Correct: pull gVerticalVelocity_fps toward (Δalt/Δt) computed from
-// consecutive baro samples. Call from the alt task after sensor_get_altitude.
-void sensor_velocity_correct(float new_alt_ft);
-
 // Shared flight data globals (updated by sensor tasks, read by FSM and SD logger)
 extern float gTotalAcc;       // total acceleration magnitude in g
 extern float gAltitude;       // barometric altitude AGL in feet
@@ -81,6 +73,17 @@ extern float gGyro[3];        // calibrated gyroscope (dps)
 extern float gOrient[3];
 extern float gVerticalVelocity_fps;  // vertical velocity from baro (ft/s, +up)
 extern uint8_t gPyroStatus;   // pyro fired bitmask (bit 0-3 = channels 1-4)
+
+// Complementary filter on vertical velocity.
+// earth_z_g is Fusion earth accel Z in g
+// Predict: integrate earth z accel into gVerticalVelocity. Call
+// from the 100 Hz IMU task with body-frame Z accel after axis remap.
+// (NWU: positive = up)
+void sensor_velocity_predict(float earth_z_g, float dt_s);
+
+// Correct: pull gVerticalVelocity toward (Δalt/Δt) computed from
+// consecutive baro samples. Call from the alt task after sensor_get_altitude.
+void sensor_velocity_correct(float baro_altitude_ft, uint32_t tick_ms);
 
 // Set ground-level reference pressure (call once at startup)
 void sensor_set_ground_pressure(float pressure_hpa);
@@ -99,9 +102,9 @@ void sensor_track_ground_pressure(float pressure_hpa);
 // Update gAltitude from current pressure reading
 float sensor_get_altitude(float pressure_hpa, float temp);
 
-float getVerticalVelocity(float currAlt, uint32_t currTick);
+float sensor_get_vertical_velocity(void);
 
-// Update gTotalAcc, gDegOffVert, gAccel, gGyro from calibrated IMU data
+// Update gTotalAcc, gAccel, gGyro from calibrated IMU data
 
 
 #endif // SENSOR_MGR_H

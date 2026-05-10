@@ -92,8 +92,6 @@ TaskHandle_t xPyroTaskHandle = NULL;
 // copies (microseconds), never across SD I/O.
 static portMUX_TYPE g_fused_mux = portMUX_INITIALIZER_UNLOCKED;
 
-static bool sd_logger_started = false;
-
 void app_main(void) {
     (void)TAG; // Stop compile warnings, unused debug variables are not a concern
 
@@ -119,7 +117,7 @@ void app_main(void) {
 
     vTaskDelay(pdMS_TO_TICKS(5000)); // Wait for everything to settle (TODO event based wait)
 
-    if(1) {
+    if(0) {
     calibration_run_menu(
         mini_fc_handle->lsm6dsv80x_handle,
         &accelOffset,
@@ -157,7 +155,7 @@ void app_main(void) {
 
     task_ret = xTaskCreate(vSdLoggerTask,
                             "SD Logger",
-                            6 * MIN_STACK_SIZE,
+                            7 * MIN_STACK_SIZE,
                             NULL,
                             1,
                             &xSdLoggerHandle);
@@ -171,7 +169,7 @@ void app_main(void) {
     // call; 8 KB gives comfortable headroom over the ~3 KB peak observed.
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU",
-                           4 * MIN_STACK_SIZE,
+                           5 * MIN_STACK_SIZE,
                            (void*) mini_fc_handle->lsm6dsv80x_handle,
                            2,
                            &xImuTaskHandle);
@@ -252,7 +250,6 @@ void vImuHandlerTask(void *pvParameters)
         );
 
         // Remap sensor axes to rocket body frame.
-        // After this, EKF, FSM, telemetry, and logger all see rocket-frame data.
         // No-op if BOARD_AXIS_ALIGNMENT is the default identity (PXPYPZ).
         accel_cal = FusionRemap(accel_cal, BOARD_AXIS_ALIGNMENT);
         gyro_cal = FusionRemap(gyro_cal, BOARD_AXIS_ALIGNMENT);
@@ -272,6 +269,7 @@ void vImuHandlerTask(void *pvParameters)
         // Store AHRS outputs
         const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
         const FusionVector earth = FusionAhrsGetEarthAcceleration(&ahrs);
+        sensor_velocity_predict(earth.axis.z, deltaTime);
 
         float totalAccG = sqrt(accel_cal.axis.x * accel_cal.axis.x + accel_cal.axis.y * accel_cal.axis.y + accel_cal.axis.z * accel_cal.axis.z);
 
@@ -308,22 +306,23 @@ static void vAltHandlerTask(void *pvParameters)
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
         LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
-        if (alt_data.pressure || alt_data.temp != LPS22DF_ERROR) {
+
+        if (alt_data.pressure && alt_data.temp != LPS22DF_ERROR) {
             // Only re-zero ground pressure while the rocket is physically on
             // the pad. Apogee/descent free-fall must NOT update the reference.
             if (flight_state.currentState == STATE_IDLE || flight_state.currentState == STATE_ARMED) {
                 sensor_track_ground_pressure(alt_data.pressure);
             }
             alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
-            verticalVel = getVerticalVelocity(alt_data.altitude, sensor_get_tick_ms());
+            sensor_velocity_correct(alt_data.altitude, sensor_get_tick_ms());
         }
         else {
             ESP_LOGE("PRESS", "Failed to obtain Altitude data");
             continue;
         }
 
-        // Convert to F
-        alt_data.temp = alt_data.temp * 1.8 + 32.0;
+        alt_data.temp = alt_data.temp * 1.8 + 32.0; // Convert to F
+        verticalVel = sensor_get_vertical_velocity();
 
         // Publish baro-side fields into FusedPacket.
         portENTER_CRITICAL(&g_fused_mux);
@@ -384,7 +383,7 @@ static void vSdLoggerTask(void *pvParameters)
             }
         }
 
-        if (print_counter++ % 100 == 0) {
+        if (print_counter++ % 50 == 0) {
             ESP_LOGI("AHRS", "\tYaw: %d deg\tPitch: %d deg\tRoll: %d deg",
                 (int)snap.orientation.angle.yaw, (int)snap.orientation.angle.pitch,
                 (int)snap.orientation.angle.roll);

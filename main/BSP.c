@@ -21,6 +21,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_mac.h"
+#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "BSP";
 
@@ -223,7 +224,7 @@ static esp_err_t bsp_I2C_readWrap(uint16_t address, uint16_t reg, uint8_t *pdata
     uint8_t tx_buf[1];
     tx_buf[0] = (uint8_t)reg;
 
-    i2c_master_transmit_receive(*targetbus, tx_buf, 1, pdata, len, -1);
+    i2c_master_transmit_receive(*targetbus, tx_buf, 1, pdata, len, pdMS_TO_TICKS(500));
 
     return ESP_OK;
 }
@@ -262,7 +263,7 @@ static esp_err_t bsp_I2C_writeWrap(uint16_t address, uint16_t reg, uint8_t *pdat
     wr_buffer[0] = (uint8_t)reg;
     memcpy(wr_buffer + 1, pdata, len);
 
-    i2c_master_transmit(*targetbus, wr_buffer, len + 1, -1);
+    i2c_master_transmit(*targetbus, wr_buffer, len + 1, pdMS_TO_TICKS(500));
 
     return ESP_OK;
 }

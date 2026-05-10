@@ -7,6 +7,7 @@
 #include "main.h"
 
 static const char *TAG = "SensorMgr";
+static portMUX_TYPE vel_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Shared flight data globals
 float gTotalAcc = 0;
@@ -16,9 +17,6 @@ float gGyro[3] = {0};
 float gOrient[3] = {0};
 float gVerticalVelocity_fps = 0;
 uint8_t gPyroStatus = 0;
-
-static int32_t prevTick = 0;
-static int32_t prevAlt = 0;
 
 void sensor_set_ground_pressure(float pressure_hpa) {
     GROUND_PRESSURE_HPA = pressure_hpa;
@@ -46,7 +44,7 @@ esp_err_t baro_calibrate_ground(LPS22DF_Object_t *baro) {
         }
         vTaskDelay(pdMS_TO_TICKS(PRESS_CAL_SAMPLE_DELAY_MS));
     }
-
+    
     if (count == 0) {
         ESP_LOGE(TAG, "Ground pressure cal failed — no valid samples.");
         return ESP_FAIL;
@@ -84,11 +82,49 @@ float sensor_get_altitude(float pressure_hpa, float temp) {
     return altitude;
 }
 
-float getVerticalVelocity(float currAlt, uint32_t currTick) {
-    float vv = 0;
-    vv = (prevAlt - currAlt) / ((currTick - prevTick) * 0.001f);
-    prevTick = currTick;
-    prevAlt = currAlt;
+void sensor_velocity_predict(float earth_z_g, float dt_s) {
+    float accel_fps2 = earth_z_g * 32.174f;  // g -> ft/s^2
 
-    return vv;
+    portENTER_CRITICAL(&vel_mux);
+    gVerticalVelocity += accel_fps2 * dt_s;
+    portEXIT_CRITICAL(&vel_mux);
+}
+
+// Called from baro task at 100 Hz.
+// Pulls integrated velocity toward baro-derived velocity.
+// alpha controls the blend: small = trust accel more (fast response),
+// large = trust baro more (less drift).
+#define COMP_ALPHA 0.02f
+
+void sensor_velocity_correct(float baro_altitude_ft, uint32_t tick_ms) {
+    static float prev_alt = 0.0f;
+    static uint32_t prev_tick = 0;
+    static bool initialized = false;
+
+    if (!initialized) {
+        prev_alt = baro_altitude_ft;
+        prev_tick = tick_ms;
+        initialized = true;
+        return;
+    }
+
+    uint32_t dt_ms = tick_ms - prev_tick;
+    if (dt_ms == 0) return;
+
+    float baro_vel = (baro_altitude_ft - prev_alt) / ((float)dt_ms * 0.001f);
+    prev_alt = baro_altitude_ft;
+    prev_tick = tick_ms;
+
+    // Nudge integrated velocity toward baro velocity
+    portENTER_CRITICAL(&vel_mux);
+    gVerticalVelocity += COMP_ALPHA * (baro_vel - gVerticalVelocity);
+    portEXIT_CRITICAL(&vel_mux);
+}
+
+float sensor_get_vertical_velocity(void) {
+    float v;
+    portENTER_CRITICAL(&vel_mux);
+    v = gVerticalVelocity;
+    portEXIT_CRITICAL(&vel_mux);
+    return v;
 }

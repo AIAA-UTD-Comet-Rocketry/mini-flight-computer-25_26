@@ -12,6 +12,7 @@ extern "C" {
 #define CAL_NVS_NAMESPACE   "imu_cal"
 #define CAL_NUM_SAMPLES     500      // samples per position (~5s at 100 Hz)
 #define CAL_SAMPLE_DELAY_MS 10       // 100 Hz collection rate
+#define CAL_REPOSITION_S    5        // seconds to reposition before each collection
 
 /**
  * @brief Run the interactive serial calibration menu.

@@ -15,7 +15,7 @@ void app_main(void);
 /* Add shared declarations for the main module here. */
 
 // Produce a single, coherent view of the rocket’s filtered sensor data
-typedef struct {
+typedef struct __attribute__((packed)){
     uint32_t currTick_ms;            // ms
     FusionVector currAcc;            // g (calibrated, body-frame)
     FusionVector currGyro;            // dps (calibrated, body-frame)
