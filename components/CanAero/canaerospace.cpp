@@ -80,6 +80,7 @@ void canas_tx_init(canas_tx_ctx_t *ctx, twai_node_handle_t node_hdl, uint8_t nod
     ctx->node_hdl    = node_hdl;
     ctx->node_id     = node_id;
     ctx->msg_counter = 0;
+    ctx->on_tx       = nullptr;
 }
 
 esp_err_t canas_tx_register_callbacks(twai_node_handle_t node_hdl) {
@@ -125,15 +126,11 @@ static esp_err_t send_frame(canas_tx_ctx_t *ctx, canas_tx_slot_t *slot, uint16_t
     frame->buffer_len = dlc;
     esp_err_t ret = twai_node_transmit(ctx->node_hdl, frame, 10);
 
-    //TODO: LED_setPattern(led_can_tx, pattern_fast_blink);
-
-    // ESP_LOGI(TAG, "CAN id=0x%03X dlc=%u", frame->header.id, frame->header.dlc);
-    // ESP_LOG_BUFFER_HEX(TAG, frame->buffer, frame->header.dlc);
-    // ESP_LOGI(TAG, "node=%u dtc=%u svc=%u msg=%u payload_len=%u",
-    //      frame->buffer[0], frame->buffer[1], frame->buffer[2],
-    //      frame->buffer[3], frame->header.dlc - 4);
-
-    if (ret != ESP_OK) release_slot(slot);
+    if (ret == ESP_OK) {
+        if (ctx->on_tx) ctx->on_tx();
+    } else {
+        release_slot(slot);
+    }
 
     return ret;
 }

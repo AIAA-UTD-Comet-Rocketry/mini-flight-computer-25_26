@@ -23,7 +23,15 @@ extern "C" {
     extern uint8_t gPyroStatus;
     State getCurrentFlightState(void);   // defined in FlightFSM.c (added)
     bool  sd_logger_is_active(void);     // defined in main/sd_logger.c (added)
-    //extern FusedDataPacket_t dataPacket;
+    // Forward-declared with int to avoid pulling BSP.h's sensor headers into this component.
+    // Values must stay in sync with led_index_t and pattern_index_t in BSP.h / gpio_mgr.h.
+    int LED_setPattern(int led, int pattern);
+}
+static const int kLedCanTx          = 1; // led_can_tx
+static const int kPatternFastBlink  = 5; // pattern_fast_blink
+
+static void pulse_can_tx_led(void) {
+    LED_setPattern(kLedCanTx, kPatternFastBlink);
 }
 
 static const char *TAG = "CanTLM";
@@ -113,6 +121,7 @@ extern "C" void can_telemetry_start(twai_node_handle_t node_hdl) {
     if (g_started) return;
     g_tx_mutex = xSemaphoreCreateMutex();
     canas_tx_init(&g_tx_ctx, node_hdl, CAN_TLM_NODE_ID);
+    g_tx_ctx.on_tx = pulse_can_tx_led;
     g_started = true;
 
     BaseType_t r = xTaskCreate(can_tlm_task, "CAN-TLM", configMINIMAL_STACK_SIZE * 6, NULL, 1, NULL);

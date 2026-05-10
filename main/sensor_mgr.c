@@ -69,17 +69,17 @@ void sensor_track_ground_pressure(float pressure_hpa) {
 
 float sensor_get_altitude(float pressure_hpa, float temp) {
 
-    float ground_pressure_hpa = sensor_get_ground_pressure();
+    // float ground_pressure_hpa = sensor_get_ground_pressure();
 
-    // Avoid divide-by-zero or nonsense inputs
-    if (ground_pressure_hpa <= 0.0f) return 0.0f;
+    // // Avoid divide-by-zero or nonsense inputs
+    // if (ground_pressure_hpa <= 0.0f) return 0.0f;
 
     // International Standard Atmosphere altitude approximation.
-    float ratio = pressure_hpa / ground_pressure_hpa;
+    float ratio = pressure_hpa / SEA_LEVEL_PRESSURE_HPA;
     float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f));
-    float altitude = altitude_m * 3.28084f;
+    float altitude_ft = altitude_m * 3.28084f;
 
-    return altitude;
+    return altitude_ft;
 }
 
 void sensor_velocity_predict(float earth_z_g, float dt_s) {

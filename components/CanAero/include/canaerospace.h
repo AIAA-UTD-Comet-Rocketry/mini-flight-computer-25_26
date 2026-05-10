@@ -65,6 +65,7 @@ typedef struct {
     twai_node_handle_t node_hdl;
     uint8_t            node_id;
     uint8_t            msg_counter;
+    void             (*on_tx)(void); // optional; called after each successful transmit
 } canas_tx_ctx_t;
 
 /*

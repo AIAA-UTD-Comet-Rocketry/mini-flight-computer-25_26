@@ -15,15 +15,15 @@ void app_main(void);
 /* Add shared declarations for the main module here. */
 
 // Produce a single, coherent view of the rocket’s filtered sensor data
-typedef struct __attribute__((packed)){
+typedef struct __attribute__((packed, aligned(4))){
     uint32_t currTick_ms;            // ms
     FusionVector currAcc;            // g (calibrated, body-frame)
     FusionVector currGyro;            // dps (calibrated, body-frame)
     FusionVector currMag;              // raw axes (no unit attached)
     float currPress;                 // hPa
     float currTempF;                 // F
-    FusionEuler orientation;             // Yaw, Pitch, Roll, Tilt in degrees
-    FusionVector linearAcc;
+    FusionEuler orientation;             // Yaw, Pitch, Roll in degrees
+    FusionVector linearAcc;          // m/s^2 (no gravity)
     float gAltitude;                 // ft (AGL)
     float gVerticalVelocity;         // ft/s (+up)
     float gTotalAcc;                 // g (gravity magnitude)

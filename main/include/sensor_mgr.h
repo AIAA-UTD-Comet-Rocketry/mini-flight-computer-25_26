@@ -22,6 +22,7 @@
 #define IMU_CAL_SAMPLE_DELAY_MS     10
 #define MAG_CAL_SAMPLE_DELAY_MS     60
 #define PRESS_CAL_SAMPLE_DELAY_MS   10
+#define SEA_LEVEL_PRESSURE_HPA      1013.25
 
 static float GROUND_PRESSURE_HPA = 1013.25f; // default sea level pressure
 static float gVerticalVelocity = 0.0f;   // complementary-filtered, ft/s

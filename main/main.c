@@ -17,7 +17,6 @@
 #include "sd_logger.h"
 #include "sensor_mgr.h"
 #include "FlightFSM.h"
-#include "attitude_ekf.h"
 #include "can_telemetry.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -115,27 +114,21 @@ void app_main(void) {
 
     init_nvs_flash_memory();
 
-    vTaskDelay(pdMS_TO_TICKS(5000)); // Wait for everything to settle (TODO event based wait)
-
     if(0) {
-    calibration_run_menu(
-        mini_fc_handle->lsm6dsv80x_handle,
-        &accelOffset,
-        &accelSensitivity,
-        &gyroOffset
-    );
-}
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    calibration_run_menu(mini_fc_handle->lsm6dsv80x_handle, &accelOffset, &accelSensitivity, &gyroOffset);
+    }
 
     load_params();
     init_AHRS();
 
     // Sample ambient pressure for ~1 s and use as the altitude=0 reference
-    if (baro_calibrate_ground(mini_fc_handle->lps22df_handle) != ESP_OK) {
-        ESP_LOGW(TAG, "Ground pressure cal failed, falling back to sea-level default.");
-        can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, false);
-    } else {
-        can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, true);
-    }
+    // if (baro_calibrate_ground(mini_fc_handle->lps22df_handle) != ESP_OK) {
+    //     ESP_LOGW(TAG, "Ground pressure cal failed, falling back to sea-level default.");
+    //     can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, false);
+    // } else {
+    //     can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, true);
+    // }
 
     /// Flight State Machine
     initFlightState(&flight_state);
@@ -145,9 +138,8 @@ void app_main(void) {
     can_telemetry_start(*mini_fc_handle->can_node_hdl);
     can_telemetry_event(EVT_BOOT, (uint8_t)esp_reset_reason());
 
-    /// SD Card Logger
     if (sd_logger_init() != ESP_OK) {
-        can_telemetry_event(EVT_SD_FAIL, 0);
+        can_telemetry_event(EVT_SD_FAIL, 0); // Send SD fail bit to CAN bus
     }
     
     // Semaphore init (guards FATFS calls in the SD logger task)
@@ -158,40 +150,37 @@ void app_main(void) {
                             7 * MIN_STACK_SIZE,
                             NULL,
                             1,
-                            &xSdLoggerHandle);
+                            (void*) &xSdLoggerHandle);
     CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
 
-    // Suspend task until AHRS is initialized
-    //vTaskSuspend( xSdLoggerHandle );
-
-    // IMU + EKF + Mag (all sensor fusion in one 100 Hz task).
-    // EKF allocates several dspm::Mat scratch matrices per Process()/Update*()
-    // call; 8 KB gives comfortable headroom over the ~3 KB peak observed.
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU",
                            5 * MIN_STACK_SIZE,
-                           (void*) mini_fc_handle->lsm6dsv80x_handle,
+                           (void*)mini_fc_handle->lsm6dsv80x_handle,
                            2,
                            &xImuTaskHandle);
     CHECK_TASK_CREATION(task_ret, "IMU task failed to create!");
-    // Pressure
+
     task_ret = xTaskCreate(vAltHandlerTask,
                            "Absolute Pressure Data Collection",
-                           3 * MIN_STACK_SIZE,
-                           (void*) mini_fc_handle->lps22df_handle,
+                           4 * MIN_STACK_SIZE,
+                           (void*)mini_fc_handle->lps22df_handle,
                            2,
                            &xAltTaskHandle);
-    // Flight State Machine
+
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
-                           3 * MIN_STACK_SIZE,
+                           4 * MIN_STACK_SIZE,
                            NULL,
                            2,  
-                           &xFsmTaskHandle);
+                           (void*)&xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
 
-    xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
+    task_ret = xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
+    CHECK_TASK_CREATION(task_ret, "LED task failed to create!");
     xTaskCreate((TaskFunction_t)Pyro_Task, "PYRO MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 4, &xPyroTaskHandle);
+
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Wait for everything to settle (TODO event based wait)
 
     // drive led_status with pattern
     LED_setPattern(led_status, pattern_burst);
@@ -212,7 +201,40 @@ void app_main(void) {
         ESP_LOGW(TAG, "=== PYRO BENCH TEST COMPLETE ===");
         ESP_LOGW(TAG, "Pyro status bitmask: 0x%02X", gPyroStatus);
     #endif
+}
+
+static void init_AHRS(void) 
+{
+    FusionAhrsInitialise(&ahrs);
+
+    const FusionAhrsSettings settings = {
+        .convention = FusionConventionNwu,
+        .gain = 0.5f,
+        .gyroscopeRange = 250.0f,
+        .accelerationRejection = 10.0f,
+        .magneticRejection = 0, // mag sensor disabled
+        .recoveryTriggerPeriod = 5 * (1000 / SENSOR_SAMPLE_RATE_MS), /* 500 samples in 5 sec */
+    };
+    FusionAhrsSetSettings(&ahrs, &settings);
+
+    FusionBiasInitialise(&bias);
+    FusionBiasSettings biasSettings = fusionBiasDefaultSettings;
+    biasSettings.sampleRate = SENSOR_SAMPLE_RATE_MS;
+    FusionBiasSetSettings(&bias, &biasSettings);
+
+    ESP_LOGI(TAG, "Fusion AHRS Initialized.");
+}
+
+static void init_nvs_flash_memory(void) {
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated and needs to be erased
+        // Retry nvs_flash_init
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    ESP_ERROR_CHECK( err );
+}   
 
 void vImuHandlerTask(void *pvParameters) 
 {
@@ -266,9 +288,11 @@ void vImuHandlerTask(void *pvParameters)
         // Update AHRS algorithm
         FusionAhrsUpdateNoMagnetometer(&ahrs, gyro_cal, accel_cal, deltaTime);
 
-        // Store AHRS outputs
+        /* Get AHRS Outputs */
+        // Orientation (euler) angles (yaw, pitch, roll)
         const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
-        const FusionVector earth = FusionAhrsGetEarthAcceleration(&ahrs);
+        // linear (earth) acceleration has gravity component removed
+        const FusionVector earth = FusionAhrsGetEarthAcceleration(&ahrs); 
         sensor_velocity_predict(earth.axis.z, deltaTime);
 
         float totalAccG = sqrt(accel_cal.axis.x * accel_cal.axis.x + accel_cal.axis.y * accel_cal.axis.y + accel_cal.axis.z * accel_cal.axis.z);
@@ -286,7 +310,6 @@ void vImuHandlerTask(void *pvParameters)
         fusedData_p->orientation.angle.roll  = euler.angle.roll;
         fusedData_p->orientation.angle.pitch = euler.angle.pitch;
         fusedData_p->orientation.angle.yaw   = euler.angle.yaw;
-        // earth accel = linear accel with gravity removed (useful for velocity)
         fusedData_p->linearAcc.axis.x = earth.axis.x;
         fusedData_p->linearAcc.axis.y = earth.axis.y;
         fusedData_p->linearAcc.axis.z = earth.axis.z;
@@ -310,14 +333,14 @@ static void vAltHandlerTask(void *pvParameters)
         if (alt_data.pressure && alt_data.temp != LPS22DF_ERROR) {
             // Only re-zero ground pressure while the rocket is physically on
             // the pad. Apogee/descent free-fall must NOT update the reference.
-            if (flight_state.currentState == STATE_IDLE || flight_state.currentState == STATE_ARMED) {
-                sensor_track_ground_pressure(alt_data.pressure);
-            }
+            // if (flight_state.currentState == STATE_IDLE || flight_state.currentState == STATE_ARMED) {
+            //     sensor_track_ground_pressure(alt_data.pressure);
+            // }
             alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
             sensor_velocity_correct(alt_data.altitude, sensor_get_tick_ms());
         }
         else {
-            ESP_LOGE("PRESS", "Failed to obtain Altitude data");
+            ESP_LOGE("PRESS", "Failed to obtain barometer data");
             continue;
         }
 
@@ -419,20 +442,6 @@ void sensor_update_flight_data(void) {
     gAccel[2] = fusedData_p->currAcc.axis.z;
 }
 
-/**
- * @brief Initialize NVS flash memory
- */
-static void init_nvs_flash_memory(void) {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // NVS partition was truncated and needs to be erased
-        // Retry nvs_flash_init
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK( err );
-}
-
 // Load calibrated params from NVS (if they exist).
 static void load_params(void) 
 {
@@ -455,28 +464,4 @@ static void load_params(void)
 uint32_t sensor_get_tick_ms(void) 
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static void init_AHRS(void) 
-{
-    FusionAhrsInitialise(&ahrs);
-
-    const FusionAhrsSettings settings = {
-        .convention = FusionConventionNwu,
-        .gain = 0.5f,
-        .gyroscopeRange = 250.0f,
-        .accelerationRejection = 10.0f,
-        .magneticRejection = 0, // mag sensor disabled
-        .recoveryTriggerPeriod = 5 * (1000 / SENSOR_SAMPLE_RATE_MS), /* 500 samples in 5 sec */
-    };
-
-    FusionAhrsSetSettings(&ahrs, &settings);
-    FusionBiasInitialise(&bias);
-
-    FusionBiasSettings biasSettings = fusionBiasDefaultSettings;
-    biasSettings.sampleRate = SENSOR_SAMPLE_RATE_MS;
-
-    FusionBiasSetSettings(&bias, &biasSettings);
-
-    ESP_LOGI(TAG, "Fusion AHRS Initialized.");
 }
