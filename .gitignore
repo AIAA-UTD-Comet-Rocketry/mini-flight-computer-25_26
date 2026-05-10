@@ -9,3 +9,5 @@ build/
 # Generated dotfiles
 .cache/
 .devcontainer/
+# VSCode configs
+.vscode/

@@ -17,6 +17,16 @@ dependencies:
       path: C:\Users\aades\esp\v5.5.1\esp-idf\examples\system\console\advanced\components\cmd_wifi
       type: local
     version: '*'
+  espressif/esp-dsp:
+    component_hash: c1832a2020342144d0de7940f73184584f182b3e9aa53180ee86c84ce7ff14dc
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.8.1
   idf:
     source:
       type: idf
@@ -25,6 +35,7 @@ direct_dependencies:
 - cmd_nvs
 - cmd_system
 - cmd_wifi
-manifest_hash: 6d54c5e451ccd396bf1c0136ca6744e4f31c8b91775ca1b87d7790cd9f317199
+- espressif/esp-dsp
+manifest_hash: 9cababe8b22ded1e8f830345148aa8074ae4d64490c2d37df6cad2a9b026dd63
 target: esp32s3
 version: 2.0.0

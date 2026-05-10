@@ -17,12 +17,14 @@ static FIL internal_log_file;
 static bool file_open = false;
 
 static const char *TAG = "SD_Logger";
+static uint32_t s_sd_write_count = 0;
 static const char *file_header = 
         "timestamp_s,"
-        "gyro_x,gyro_y,gyro_z,"
         "acc_x,acc_y,acc_z,"
-        // "mag_x,mag_y,mag_z,"
+        "accel_g, velocity_fps,"
+        "yaw_deg, pitch_deg, roll_deg,"
         "pressure_hpa,altitude_ft,temp_f,"
+        "flight_state,"
         "drogue1,drogue2,main1,main2\n";
 
 static FILE *log_file = NULL;
@@ -91,7 +93,7 @@ esp_err_t sd_logger_init(void) {
         esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
         return ESP_FAIL;
     }
-
+    file_open = true;
 
     // Write CSV header
     sd_write_log(
@@ -102,6 +104,10 @@ esp_err_t sd_logger_init(void) {
     ESP_LOGI(TAG, "Logging to: %s", filepath);
 
     return ESP_OK;
+}
+
+bool sd_logger_is_active(void) {
+    return file_open;
 }
 
 esp_err_t reset_sd() {
@@ -126,41 +132,63 @@ esp_err_t sd_write_log(const void* data, size_t len) {
         return ESP_FAIL;
     }
 
-    res = f_sync(&internal_log_file);
-    if(res != FR_OK) {
-        ESP_LOGE(TAG, "f_sync failed: %d", res);
-        return ESP_FAIL;
+    return ESP_OK;
+}
+
+esp_err_t write_packet(LogSensorRecord_t record) {
+    char line[256]; int len;
+
+    len = snprintf(line, 256,
+        "%.1f,"
+        "%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,"
+        "%.1f,%.1f,%.1f,"
+        "%d,"
+        "%c,%c,%c,%c\n",
+        record.timestamp_s,
+        record.accel.axis.x, record.accel.axis.y, record.accel.axis.z,
+        record.gTotalAcc, record.gVertVelocity,
+        record.orientation.angle.yaw, record.orientation.angle.pitch, record.orientation.angle.roll,
+        record.baro.pressure, record.baro.altitude, record.baro.temp,
+        record.flightState,
+        (record.pyroStatus & (1U << 0)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 1)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 2)) ? 'Y' : 'N',
+        (record.pyroStatus & (1U << 3)) ? 'Y' : 'N');
+
+    if (len > 0) {
+        if (sd_write_log(line, (size_t)len) != ESP_OK) return ESP_FAIL;
+        s_sd_write_count++;
+        if ((s_sd_write_count % 10) == 0) {
+            FRESULT res = f_sync(&internal_log_file);
+            if (res != FR_OK) {
+                ESP_LOGE(TAG, "f_sync failed: %d", res);
+                return ESP_FAIL;
+            }
+        }
     }
 
     return ESP_OK;
 }
 
-esp_err_t write_packet(SensorDataPacket_t packet) {
-    char line[256]; int len;
-    if (log_file == NULL) return ESP_FAIL;
+// Unmount partition and disable SDMMC peripheral
+esp_err_t sd_safe_unmount(void) {
+    if (!file_open) return ESP_OK;
 
-    float timestamp_s = (float)(esp_timer_get_time() / 1000000.0);
-
-    len = snprintf(line, 256,
-        "%.3f,"
-        "%.3f,%.3f,%.3f,"
-        "%.3f,%.3f,%.3f,"
-//        "%.0f,%.0f,%.0f,"
-        "%.4f,%.2f,%.1f,"
-        "%c,%c,%c,%c\n",
-        timestamp_s,
-        packet.imu.accel_g[0], packet.imu.accel_g[1], packet.imu.accel_g[2],
-        packet.imu.gyro_dps[0], packet.imu.gyro_dps[1], packet.imu.gyro_dps[2],
-//        packet.mag.x, packet.mag.y, packet.mag.z,
-        packet.alt.pressure, packet.alt.altitude, packet.alt.temp,
-        (gPyroStatus & (1 << 0)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 1)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 2)) ? 'Y' : 'N',
-        (gPyroStatus & (1 << 3)) ? 'Y' : 'N');
-
-    if (len > 0) {
-        sd_write_log(line, (size_t)len);
+    // Flush and close the CSV file first
+    FRESULT res = f_sync(&internal_log_file);
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "f_sync failed: %d", res);
+    }
+    res = f_close(&internal_log_file);
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "f_close failed: %d", res);
+        return ESP_FAIL;
     }
 
+    file_open = false;
+    esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
+    ESP_LOGW(TAG, "Unmounted sdcard");
     return ESP_OK;
 }

@@ -16,10 +16,12 @@
  */
 
 #include "BSP.h"
+#include "canaerospace.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_mac.h"
+#include "freertos/FreeRTOS.h"
 
 static const char *TAG = "BSP";
 
@@ -222,7 +224,7 @@ static esp_err_t bsp_I2C_readWrap(uint16_t address, uint16_t reg, uint8_t *pdata
     uint8_t tx_buf[1];
     tx_buf[0] = (uint8_t)reg;
 
-    i2c_master_transmit_receive(*targetbus, tx_buf, 1, pdata, len, -1);
+    i2c_master_transmit_receive(*targetbus, tx_buf, 1, pdata, len, pdMS_TO_TICKS(500));
 
     return ESP_OK;
 }
@@ -261,7 +263,7 @@ static esp_err_t bsp_I2C_writeWrap(uint16_t address, uint16_t reg, uint8_t *pdat
     wr_buffer[0] = (uint8_t)reg;
     memcpy(wr_buffer + 1, pdata, len);
 
-    i2c_master_transmit(*targetbus, wr_buffer, len + 1, -1);
+    i2c_master_transmit(*targetbus, wr_buffer, len + 1, pdMS_TO_TICKS(500));
 
     return ESP_OK;
 }
@@ -520,11 +522,15 @@ static esp_err_t bsp_TWAI_init(void)
         .io_cfg.rx = CAN_RX_PIN, // TWAI RX GPIO pin
         .io_cfg.bus_off_indicator = -1,
         .io_cfg.quanta_clk_out = -1,
-        .bit_timing.bitrate = 200000,  // 200 kbps bitrate
+        .bit_timing.bitrate = 250000,  // 250 kbps bitrate
         .tx_queue_depth = 5,        // Transmit queue depth set to 5
+        //.fail_retry_cnt = -1, // Re-transmit infinitely 
     };
     // Create a new TWAI controller driver instance
     ret = twai_new_node_onchip(&can_node_config, &can_node_hdl);
+    // Register CANaerospace TX-done callback before enabling the node
+    if(ret == ESP_OK)
+        ret = canas_tx_register_callbacks(can_node_hdl);
     // Start the TWAI controller
     if(ret == ESP_OK)
         ret = twai_node_enable(can_node_hdl);
@@ -602,3 +608,5 @@ esp_err_t bsp_init(board_handle_t *handle, bsp_config_t *bsp_init_obj)
     ESP_LOGI(TAG, "BSP initialized successfully.");
     return 0; // Success code
 }
+
+

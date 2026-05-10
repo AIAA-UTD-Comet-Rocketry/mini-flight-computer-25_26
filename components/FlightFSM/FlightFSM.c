@@ -45,6 +45,18 @@ __attribute__((weak)) bool drogueDescentExitTransition(void) { return true; }
 __attribute__((weak)) bool mainDescentExitTransition(void) { return true; }
 __attribute__((weak)) bool landedExitTransition(void) { return true; }
 
+// Bound by registerFlightState() so getCurrentFlightState() can resolve
+// without needing the FSM struct as an argument from every caller.
+static FlightState *g_active_fs = NULL;
+
+void registerFlightState(FlightState *fs) {
+    g_active_fs = fs;
+}
+
+State getCurrentFlightState(void) {
+    return (g_active_fs != NULL) ? g_active_fs->currentState : STATE_IDLE;
+}
+
 /*
  * Initialization function for FlightState.
  * Users can override weak functions or modify the structure after initialization.

@@ -41,16 +41,28 @@
 /* Extern pyro task handle (defined in main.c) */
 extern TaskHandle_t xPyroTaskHandle;
 
+/* Forward decls from CanAero. Forward-declared rather than #include'd to
+ * avoid a CanAero<->FlightFSM circular component dependency. */
+extern void can_telemetry_event(uint8_t event_type, uint8_t event_data);
+#define EVT_ARMED        0x02
+#define EVT_LAUNCH       0x04
+#define EVT_BURNOUT      0x05
+#define EVT_APOGEE       0x06
+#define EVT_DROGUE_FIRED 0x07
+#define EVT_MAIN_FIRED   0x08
+#define EVT_LANDED       0x09
+#define EVT_DISARMED     0x03
+
 /* Pyro channel bit masks (mirrors pyro_index_t in BSP.h) */
-#define PYRO_DRG1_BIT   (1 << 0)  // drogue1_channel - 35g CO2
-#define PYRO_DRG2_BIT   (1 << 1)  // drogue2_channel - 45g CO2
-#define PYRO_MAIN1_BIT  (1 << 2)  // main1_channel - TD2 ejection
-#define PYRO_MAIN2_BIT  (1 << 3)  // main2_channel - TD2 ejection
+#define PYRO_DRG1_BIT   (1U << 0)  // drogue1_channel - 35g CO2
+#define PYRO_DRG2_BIT   (1U << 1)  // drogue2_channel - 45g CO2
+#define PYRO_MAIN1_BIT  (1U << 2)  // main1_channel - TD2 ejection
+#define PYRO_MAIN2_BIT  (1U << 3)  // main2_channel - TD2 ejection
 
 /* Extern data streams (defined in sensor_mgr.c) */
 extern float gAltitude;
 extern float gTotalAcc;
-extern float gDegOffVert;
+extern float gVerticalVelocity_fps;
 
 /* Extern tick function (defined in sensor_mgr.c) */
 extern uint32_t sensor_get_tick_ms(void);
@@ -60,7 +72,11 @@ static const char *TAG = "FSM";
 /* Private Variables */
 float prevAlt = 0;
 float prevVel = 0;
+float altOffset = 0;
 uint8_t apogeeConfirmed = 0;
+uint8_t drg1Fired = 0;
+uint8_t main1Fired = 0;
+uint8_t main2Fired = 0;
 uint8_t descendingSamples = 0;
 uint8_t landedSamples = 0;
 uint32_t transDelay = UINT32_MAX;
@@ -72,28 +88,38 @@ uint32_t transDelay = UINT32_MAX;
 #define BURNOUT_ACC_THRESH_G    1.3     // Lower acceleration bound to indicate burn end
 #define MAX_BURN_TIME_MS        4000    // Burn state timeout to catch error
 #define APOGEE_SAMPLE_PERIOD_MS 500     // Descent detection altitude sample compare period
-#define APOGEE_MIN_THRESHOLD    5000  // Min apogee altitude needed for drogue to be deployed (use 5000 for flight)
-#define MAIN_DEPLOY_ALTITUDE    1500  // End of drogue descent (ft)
-//#define MAIN_DEPLOY_ACC_THRESH_G   10   // Threshold acceleration for failsafe main deployment
+#define MAIN_DEPLOY_ALT_FT      1500    // Main deployment altitude threshold
+#define MAIN_BKP_DEPLOY_ALT_FT  1300    // Main backup deployment altitude threshold
 #define LANDED_SAMPLE_PERIOD_MS 10000   // Landed detection altitude sample compare period
-#define LANDED_ALT_THRESHOLD	  1.0		// 1ft change in altitude to be considered landed
-#define LANDED_SAMPLES_REQ		  1		// 1 consecutive stable samples
+#define LANDED_ALT_THRESH_FT 	  3.0		  // Change in altitude (ft) to be considered landed
+#define LANDED_SAMPLES_REQ		  10		    // consecutive stable samples
 #define APOGEE_COOLDOWN_MS      100     // 0.1s stable descent required
-#define LANDED_COOLDOWN_MS		  10000	// 10 sec
-#define MACH_LOCK_TIME_MS       4000 // ms - must cover transonic phase (~Mach 0.8-1.2)
-#define APOGEE_CONSEC_SAMPLES   3    // consecutive descending samples before apogee confirm
+#define DROGUE_SEQ_DELAY_MS     1000    // Delay between DRG1 and DRG2 firing
+#define LANDED_COOLDOWN_MS		  10000	  // 10 sec
+#define LANDED_VEL_THRESH_FPS   8       // < 8 feet / s
+#define MACH_LOCK_TIME_MS       4000    // ms - must cover transonic phase (~Mach 0.8-1.2)
+#define APOGEE_CONSEC_SAMPLES   3       // consecutive descending samples before apogee confirm
 
 
-/* Redefined Callback Implementations, Called when new state is entered */
+/* Redefined Callback Implementations, Called when new state is entered.
+ * Each transition also fires a CAN event frame for ground telemetry. */
 void enterIdle(void)           { ESP_LOGW(TAG, "Entered IDLE at %lu ms", sensor_get_tick_ms()); }
-void enterArmed(void)          { ESP_LOGW(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms()); }
-void enterDisarm(void)         { ESP_LOGW(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms()); }
-void enterBurning(void)        { ESP_LOGW(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms()); }
-void enterRising(void)         { ESP_LOGW(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms()); }
-void enterApogee(void)         { ESP_LOGW(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms()); }
-void enterDrogueDescent(void)  { ESP_LOGW(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterMainDescent(void)    { ESP_LOGW(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms()); }
-void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms()); }
+void enterArmed(void)          { ESP_LOGW(TAG, "Entered ARMED at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_ARMED, 0); }
+void enterDisarm(void)         { ESP_LOGW(TAG, "Entered DISARM at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_DISARMED, 0); }
+void enterBurning(void)        { ESP_LOGW(TAG, "Entered BURNING at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_LAUNCH, (uint8_t)(gTotalAcc + 0.5f)); }
+void enterRising(void)         { ESP_LOGW(TAG, "Entered RISING at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_BURNOUT, 0); }
+void enterApogee(void)         { ESP_LOGW(TAG, "Entered APOGEE at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_APOGEE, 0); }
+void enterDrogueDescent(void)  { ESP_LOGW(TAG, "Entered DROGUE_DESCENT at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_DROGUE_FIRED, 0); }
+void enterMainDescent(void)    { ESP_LOGW(TAG, "Entered MAIN_DESCENT at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_MAIN_FIRED, 0); }
+void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", sensor_get_tick_ms());
+                                  can_telemetry_event(EVT_LANDED, 0); }
 
 /*
  * Redefined Transition Functions, true moves to next.
@@ -110,6 +136,8 @@ bool idleExitTransition(void)
 bool armedExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
+  altOffset = gAltitude;
+
   // Look for launch
   if(gTotalAcc > LAUNCH_ACC_THRESH_G)
   {
@@ -156,7 +184,7 @@ bool risingExitTransition(void)
   // Look for apogee — require consecutive descending samples to filter transonic noise
   if(uwTick >= transDelay)
   {
-    if(gAltitude < prevAlt) // Check for negative altitude -> rocket falling
+    if(gAltitude < prevAlt || gVerticalVelocity_fps < 0) // Check for negative altitude -> rocket falling
     {
       descendingSamples++;
       if(descendingSamples >= APOGEE_CONSEC_SAMPLES) // Check multiple samples
@@ -181,32 +209,23 @@ bool risingExitTransition(void)
 bool apogeeExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
-	float currentVel = (gAltitude - prevAlt) / (APOGEE_SAMPLE_PERIOD_MS * 0.001f); // ft / s
 
 	// Apogee detection logic
 	if (uwTick >= transDelay) {
-		if (gAltitude > APOGEE_MIN_THRESHOLD && currentVel <= 0 && !apogeeConfirmed)
+		if (!drg1Fired)
 		{
-			// Negative velocity confirmed — start cooldown before firing
-			transDelay = uwTick + APOGEE_COOLDOWN_MS;
-			apogeeConfirmed = 1;
-		}
-		else if (apogeeConfirmed && uwTick > transDelay)
-		{
-			// Cooldown elapsed — fire drogue 1 and drogue 2 sequentially
-			if (xPyroTaskHandle != NULL)
-			{
-				xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
-				xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
-			}
-			prevAlt = gAltitude; // reset for descent tracking
-			return true;
+			// Cooldown elapsed — fire drogue 1, then arm delay for drogue 2
+			xTaskNotify(xPyroTaskHandle, PYRO_DRG1_BIT, eSetBits);
+			drg1Fired = 1;
+			transDelay = uwTick + DROGUE_SEQ_DELAY_MS;
 		}
 		else
 		{
-			// Not yet confirmed — keep sampling
-			prevAlt = gAltitude;
-			transDelay = uwTick + APOGEE_SAMPLE_PERIOD_MS;
+			// Sequence delay elapsed — fire drogue 2
+			xTaskNotify(xPyroTaskHandle, PYRO_DRG2_BIT, eSetBits);
+        
+			prevAlt = gAltitude; // reset for descent tracking
+			return true;
 		}
 	}
 	return false;
@@ -214,14 +233,19 @@ bool apogeeExitTransition(void)
 
 bool drogueDescentExitTransition(void)
 {
-  if(gAltitude < MAIN_DEPLOY_ALTITUDE)
+  // Latch each main charge so it fires exactly once. Without latching the
+  // FSM re-notifies every 10 ms tick while alt is below threshold, which
+  // backs up the pyro task's notification queue.
+  if(!main1Fired && gAltitude < MAIN_DEPLOY_ALT_FT)
   {
-    // Fire main charge (TD2 ejection)
-    if (xPyroTaskHandle != NULL)
-    {
-      xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
-      //xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
-    }
+    xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
+    main1Fired = 1;
+  }
+
+  if(!main2Fired && gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
+  {
+    xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
+    main2Fired = 1;
     transDelay = sensor_get_tick_ms();
     return true;
   }
@@ -234,13 +258,16 @@ bool mainDescentExitTransition(void)
 	// Calculate altitude stability
 	float deltaAlt = fabs(gAltitude - prevAlt);
 
-  // Look for apogee
   if(uwTick >= transDelay)
   {
-    if (deltaAlt < LANDED_ALT_THRESHOLD)
+    if (deltaAlt < LANDED_ALT_THRESH_FT || fabs(gVerticalVelocity_fps) < LANDED_VEL_THRESH_FPS)
 	  {
     	landedSamples++;
-    	if (landedSamples > LANDED_SAMPLES_REQ) return true;
+    	if (landedSamples > LANDED_SAMPLES_REQ)
+      {
+        transDelay = uwTick;
+        return true;
+      }
 	  }
     else
     {

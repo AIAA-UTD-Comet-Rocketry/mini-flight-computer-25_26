@@ -3,143 +3,128 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "nvs.h"
+#include "main.h"
 
 static const char *TAG = "SensorMgr";
-
-// Expected gravity vector when board is flat, Z-up (in mg)
-#define GRAVITY_MG 1000.0f
+static portMUX_TYPE vel_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Shared flight data globals
 float gTotalAcc = 0;
 float gAltitude = 0;
-float gDegOffVert = 0;
 float gAccel[3] = {0};
 float gGyro[3] = {0};
-float gMag[3] = {0};
-float gPressure = 0;
-float gTemperature_F = 0;
+float gOrient[3] = {0};
+float gVerticalVelocity_fps = 0;
 uint8_t gPyroStatus = 0;
 
-static float SEALEVELPRESSURE_HPA = 1013.25f; // default sea level
+void sensor_set_ground_pressure(float pressure_hpa) {
+    GROUND_PRESSURE_HPA = pressure_hpa;
+    ESP_LOGI(TAG, "Ground pressure set: %.2f hPa", pressure_hpa);
+}
 
-esp_err_t imu_calibrate(LSM6DSV80X_Object_t *imu, imu_cal_t *cal) {
-    if (imu == NULL || cal == NULL) {
-        return ESP_ERR_INVALID_ARG;
+float sensor_get_ground_pressure(void) {
+    return GROUND_PRESSURE_HPA;
+}
+
+esp_err_t baro_calibrate_ground(LPS22DF_Object_t *baro) {
+    if (baro == NULL) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGI(TAG, "Sampling ground pressure (%d samples, ~%d s)...",
+             PRESS_CAL_NUM_SAMPLES,
+             (PRESS_CAL_NUM_SAMPLES * PRESS_CAL_SAMPLE_DELAY_MS) / 1000);
+
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < PRESS_CAL_NUM_SAMPLES; i++) {
+        float p = 0.0f;
+        if (LPS22DF_PRESS_GetPressure(baro, &p) == LPS22DF_OK && p > 0.0f) {
+            sum += p;
+            count++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(PRESS_CAL_SAMPLE_DELAY_MS));
+    }
+    
+    if (count == 0) {
+        ESP_LOGE(TAG, "Ground pressure cal failed — no valid samples.");
+        return ESP_FAIL;
     }
 
-    cal->is_calibrated = false;
+    float gnd_p = sum / (float) count;
 
-    float accel_sum[3] = {0};
-    float gyro_sum[3] = {0};
-    LSM6DSV80X_Axes_t accel_axes, gyro_axes;
-
-    ESP_LOGI(TAG, "Starting IMU calibration (%d samples, ~%d seconds)...",
-             IMU_CAL_NUM_SAMPLES, (IMU_CAL_NUM_SAMPLES * IMU_CAL_SAMPLE_DELAY_MS) / 1000);
-    ESP_LOGI(TAG, "Keep the board stationary!");
-
-    for (int i = 0; i < IMU_CAL_NUM_SAMPLES; i++) {
-        LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
-        LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
-
-        accel_sum[0] += (float)accel_axes.x;
-        accel_sum[1] += (float)accel_axes.y;
-        accel_sum[2] += (float)accel_axes.z;
-
-        gyro_sum[0] += (float)gyro_axes.x;
-        gyro_sum[1] += (float)gyro_axes.y;
-        gyro_sum[2] += (float)gyro_axes.z;
-
-        vTaskDelay(pdMS_TO_TICKS(IMU_CAL_SAMPLE_DELAY_MS));
-    }
-
-    // Accel bias: average minus expected gravity on Z
-    cal->accel_bias_mg[0] = accel_sum[0] / IMU_CAL_NUM_SAMPLES;
-    cal->accel_bias_mg[1] = accel_sum[1] / IMU_CAL_NUM_SAMPLES;
-    cal->accel_bias_mg[2] = accel_sum[2] / IMU_CAL_NUM_SAMPLES - GRAVITY_MG;
-
-    // Gyro bias: average (should be near zero when stationary)
-    cal->gyro_bias_mdps[0] = gyro_sum[0] / IMU_CAL_NUM_SAMPLES;
-    cal->gyro_bias_mdps[1] = gyro_sum[1] / IMU_CAL_NUM_SAMPLES;
-    cal->gyro_bias_mdps[2] = gyro_sum[2] / IMU_CAL_NUM_SAMPLES;
-
-    cal->is_calibrated = true;
-
-    ESP_LOGI(TAG, "Calibration complete.");
-    ESP_LOGI(TAG, "Accel bias (mg):  X=%.2f  Y=%.2f  Z=%.2f",
-             cal->accel_bias_mg[0], cal->accel_bias_mg[1], cal->accel_bias_mg[2]);
-    ESP_LOGI(TAG, "Gyro bias (mdps): X=%.2f  Y=%.2f  Z=%.2f",
-             cal->gyro_bias_mdps[0], cal->gyro_bias_mdps[1], cal->gyro_bias_mdps[2]);
-
+    sensor_set_ground_pressure(gnd_p);
     return ESP_OK;
 }
 
-void imu_apply_calibration(const imu_cal_t *cal,
-                           const LSM6DSV80X_Axes_t *raw_accel,
-                           const LSM6DSV80X_Axes_t *raw_gyro,
-                           imu_calibrated_t *out) {
-    // Subtract bias (mg) then convert mg -> g
-    out->accel_g[0] = ((float)raw_accel->x - cal->accel_bias_mg[0]) / 1000.0f;
-    out->accel_g[1] = ((float)raw_accel->y - cal->accel_bias_mg[1]) / 1000.0f;
-    out->accel_g[2] = ((float)raw_accel->z - cal->accel_bias_mg[2]) / 1000.0f;
+// Slowly re-zero ground pressure to absorb LPS22DF warmup drift and slow
+// atmospheric shifts. Caller must only invoke this while the rocket is
+// physically on the pad (i.e. FSM in IDLE or ARMED). 
+#define GROUND_TRACK_ALPHA 0.01f  // EMA coefficient (smaller = slower)
 
-    // Subtract bias (mdps) then convert mdps -> deg/s
-    out->gyro_dps[0] = ((float)raw_gyro->x - cal->gyro_bias_mdps[0]) / 1000.0f;
-    out->gyro_dps[1] = ((float)raw_gyro->y - cal->gyro_bias_mdps[1]) / 1000.0f;
-    out->gyro_dps[2] = ((float)raw_gyro->z - cal->gyro_bias_mdps[2]) / 1000.0f;
+void sensor_track_ground_pressure(float pressure_hpa) {
+    if (pressure_hpa <= 0.0f) return;
+    GROUND_PRESSURE_HPA = (1.0f - GROUND_TRACK_ALPHA) * GROUND_PRESSURE_HPA
+                          + GROUND_TRACK_ALPHA * pressure_hpa;
 }
 
-uint32_t sensor_get_tick_ms(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
+float sensor_get_altitude(float pressure_hpa, float temp) {
+
+    // float ground_pressure_hpa = sensor_get_ground_pressure();
+
+    // // Avoid divide-by-zero or nonsense inputs
+    // if (ground_pressure_hpa <= 0.0f) return 0.0f;
+
+    // International Standard Atmosphere altitude approximation.
+    float ratio = pressure_hpa / SEA_LEVEL_PRESSURE_HPA;
+    float altitude_m = 44330.0f * (1.0f - powf(ratio, 0.1903f));
+    float altitude_ft = altitude_m * 3.28084f;
+
+    return altitude_ft;
 }
 
-void sensor_set_ground_pressure(float pressure_hpa) {
-    SEALEVELPRESSURE_HPA = pressure_hpa;
-    ESP_LOGI(TAG, "Ground pressure set: %.2f hPa", SEALEVELPRESSURE_HPA);
+void sensor_velocity_predict(float earth_z_g, float dt_s) {
+    float accel_fps2 = earth_z_g * 32.174f;  // g -> ft/s^2
+
+    portENTER_CRITICAL(&vel_mux);
+    gVerticalVelocity += accel_fps2 * dt_s;
+    portEXIT_CRITICAL(&vel_mux);
 }
 
-float sensor_update_altitude(float pressure_hpa, float temp) {
-    const float R = 287.05f;   // Specific gas constant for dry air (J/(kg·K))
-    const float g = 9.80665f;  // Gravity (m/s²)
+// Called from baro task at 100 Hz.
+// Pulls integrated velocity toward baro-derived velocity.
+// alpha controls the blend: small = trust accel more (fast response),
+// large = trust baro more (less drift).
+#define COMP_ALPHA 0.02f
 
-    // Convert temperature to Kelvin
-    float temp_k = temp + 273.15f;
+void sensor_velocity_correct(float baro_altitude_ft, uint32_t tick_ms) {
+    static float prev_alt = 0.0f;
+    static uint32_t prev_tick = 0;
+    static bool initialized = false;
 
-    // Hypsometric equation: altitude relative to ground reference
-    float altitude_m = (R * temp_k / g) * logf(SEALEVELPRESSURE_HPA / pressure_hpa);
-    gAltitude = altitude_m * 3.28084f;
-
-    // Store pressure and temperature for SD logging
-    gPressure = pressure_hpa;
-    gTemperature_F = temp * 9.0f / 5.0f + 32.0f;
-    return gAltitude;
-}
-
-void sensor_update_flight_data(const imu_calibrated_t *imu) {
-    float ax = imu->accel_g[0];
-    float ay = imu->accel_g[1];
-    float az = imu->accel_g[2];
-
-    // Store calibrated values for SD logging
-    gAccel[0] = ax;  gAccel[1] = ay;  gAccel[2] = az;
-    gGyro[0] = imu->gyro_dps[0];
-    gGyro[1] = imu->gyro_dps[1];
-    gGyro[2] = imu->gyro_dps[2];
-
-    gTotalAcc = sqrtf(ax * ax + ay * ay + az * az);
-
-    // Degrees off vertical: angle between accel vector and Z-axis
-    if (gTotalAcc > 0.01f) {
-        gDegOffVert = acosf(az / gTotalAcc) * (180.0f / (float)M_PI);
+    if (!initialized) {
+        prev_alt = baro_altitude_ft;
+        prev_tick = tick_ms;
+        initialized = true;
+        return;
     }
-    //printf("gTotalAcc: %.2f, gDegOffVert: %.2f\n", gTotalAcc, gDegOffVert);
+
+    uint32_t dt_ms = tick_ms - prev_tick;
+    if (dt_ms == 0) return;
+
+    float baro_vel = (baro_altitude_ft - prev_alt) / ((float)dt_ms * 0.001f);
+    prev_alt = baro_altitude_ft;
+    prev_tick = tick_ms;
+
+    // Nudge integrated velocity toward baro velocity
+    portENTER_CRITICAL(&vel_mux);
+    gVerticalVelocity += COMP_ALPHA * (baro_vel - gVerticalVelocity);
+    portEXIT_CRITICAL(&vel_mux);
 }
 
-// TODO: Calibrate mag sensor using NXP lib
-MagData_t sensor_update_mag(IIS2MDC_Axes_t axes) {
-    MagData_t mag_data = {
-        .x = (float)axes.x,
-        .y = (float)axes.y,
-        .z = (float)axes.z
-    };
-    return mag_data;
+float sensor_get_vertical_velocity(void) {
+    float v;
+    portENTER_CRITICAL(&vel_mux);
+    v = gVerticalVelocity;
+    portEXIT_CRITICAL(&vel_mux);
+    return v;
 }
