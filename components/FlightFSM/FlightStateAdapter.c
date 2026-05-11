@@ -236,13 +236,13 @@ bool drogueDescentExitTransition(void)
   // Latch each main charge so it fires exactly once. Without latching the
   // FSM re-notifies every 10 ms tick while alt is below threshold, which
   // backs up the pyro task's notification queue.
-  if(!main1Fired && gAltitude < MAIN_DEPLOY_ALT_FT)
+  if(!main1Fired && gAltitude < (MAIN_DEPLOY_ALT_FT + altOffset))
   {
     xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
     main1Fired = 1;
   }
 
-  if(!main2Fired && gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
+  if(!main2Fired && gAltitude < (MAIN_BKP_DEPLOY_ALT_FT + altOffset))
   {
     xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
     main2Fired = 1;

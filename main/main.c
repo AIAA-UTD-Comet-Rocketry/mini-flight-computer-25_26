@@ -35,11 +35,12 @@
 #define SENSOR_SAMPLE_RATE_MS   10  // 1/10ms = 100Hz
 #define LOGGING_SAMPLE_RATE_MS  100 // ms (10 Hz SD log cadence)
 #define FSM_SAMPLE_RATE         10
+#define BARO_CAL_CYCLES         500
 
 // Uncomment to run pyro bench test on boot (DO NOT fly with this enabled)
 //#define PYRO_BENCH_TEST
 
-static const char *TAG = "Main";
+static const char *TAG = "MAIN";
 
 static FlightState flight_state;
 FusedPacket_ptr fusedData_p;
@@ -109,6 +110,7 @@ void app_main(void) {
 
     if (bsp_init(&mini_fc_handle, &bsp_init_cfg) != ESP_OK) {
         ESP_LOGE(TAG, "BSP init failed. Stopping program!");
+        LED_setPattern(led_can_rx, pattern_on);
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 
@@ -145,14 +147,6 @@ void app_main(void) {
     // Semaphore init (guards FATFS calls in the SD logger task)
     xSemaphore = xSemaphoreCreateMutex();
 
-    task_ret = xTaskCreate(vSdLoggerTask,
-                            "SD Logger",
-                            7 * MIN_STACK_SIZE,
-                            NULL,
-                            1,
-                            (void*) &xSdLoggerHandle);
-    CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
-
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU",
                            5 * MIN_STACK_SIZE,
@@ -175,6 +169,16 @@ void app_main(void) {
                            2,  
                            (void*)&xFsmTaskHandle);
     CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
+    vTaskSuspend( xFsmTaskHandle ); // Suspend task until sensors are stabilized
+
+    task_ret = xTaskCreate(vSdLoggerTask,
+                            "SD Logger",
+                            7 * MIN_STACK_SIZE,
+                            NULL,
+                            1,
+                            (void*)&xSdLoggerHandle);
+    CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
+    vTaskSuspend( xSdLoggerHandle ); // Suspend task until sensors are stabilized
 
     task_ret = xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
     CHECK_TASK_CREATION(task_ret, "LED task failed to create!");
@@ -239,13 +243,20 @@ static void init_nvs_flash_memory(void) {
 void vImuHandlerTask(void *pvParameters) 
 {
     LSM6DSV80X_Object_t *imu = (LSM6DSV80X_Object_t *)pvParameters;
-
     LSM6DSV80X_Axes_t accel_axes, gyro_axes;
     FusionVector accel_axes_f, gyro_axes_f;
 
+    ESP_LOGI(TAG, "Entering vImuHandlerTask...");
+
     while (1) {
-        LSM6DSV80X_ACC_GetAxes(imu, &accel_axes);
-        LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes);
+        if (LSM6DSV80X_ACC_GetAxes(imu, &accel_axes) != LSM6DSV80X_OK) {
+            ESP_LOGE(TAG, "Failed to obtain Accelerometer data!");
+            continue;
+        }
+        if (LSM6DSV80X_GYRO_GetAxes(imu, &gyro_axes) != LSM6DSV80X_OK) {
+            ESP_LOGE(TAG, "Failed to obtain Gyroscope data!");
+            continue;
+        }
 
         // mg -> g
         accel_axes_f.axis.x = (float)accel_axes.x / 1000.0;
@@ -325,24 +336,25 @@ static void vAltHandlerTask(void *pvParameters)
     LPS22DF_Object_t *alt = (LPS22DF_Object_t *)pvParameters;
     AltData_t alt_data;
     float verticalVel = 0;
+    uint16_t cycle_count = 0;
+    bool flag = false;
+
+    ESP_LOGI(TAG, "Entering vAltHandlerTask...");
 
     sensor_set_ground_pressure(SEA_LEVEL_PRESSURE_HPA);
 
     while(1) {
-        LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
-        LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
-
-        if (alt_data.pressure && alt_data.temp != LPS22DF_ERROR) {
-
-            // Filter pressure readings using 2nd order butterworth filter
-            alt_data.pressure = sensor_pressure_filter(alt_data.pressure);
-            alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
-            sensor_velocity_correct(alt_data.altitude, sensor_get_tick_ms());
-        }
-        else {
-            ESP_LOGE("PRESS", "Failed to obtain barometer data");
+        if (LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure) != LPS22DF_OK) {
+            ESP_LOGE(TAG, "Failed to obtain Pressure data!");
             continue;
         }
+
+        LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
+
+        // Filter pressure readings using 2nd order butterworth filter
+        alt_data.pressure = sensor_pressure_filter(alt_data.pressure);
+        alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
+        sensor_velocity_correct(alt_data.altitude, sensor_get_tick_ms());
 
         alt_data.temp = alt_data.temp * 1.8 + 32.0; // Convert to F
         verticalVel = sensor_get_vertical_velocity();
@@ -355,6 +367,13 @@ static void vAltHandlerTask(void *pvParameters)
         fusedData_p->gVerticalVelocity = verticalVel;
         portEXIT_CRITICAL(&g_fused_mux);
 
+        if (cycle_count == BARO_CAL_CYCLES && !flag) {
+            vTaskResume( xSdLoggerHandle );
+            vTaskResume( xFsmTaskHandle );
+            flag = true;
+        }
+        cycle_count++;
+
         vTaskDelay(pdMS_TO_TICKS(SENSOR_SAMPLE_RATE_MS));
     }
 }
@@ -362,6 +381,10 @@ static void vAltHandlerTask(void *pvParameters)
 static void vFsmTask(void *pvParameters) 
 {
     (void)pvParameters;
+    vTaskDelay(pdMS_TO_TICKS(5000));  // wait for sensors to settle
+
+    ESP_LOGI(TAG, "Entering vFSMTask...");
+
     while (1) {
         sensor_update_flight_data();
         updateState(&flight_state);
@@ -374,14 +397,17 @@ static void vSdLoggerTask(void *pvParameters)
     LogSensorRecord_t record;
     FusedPacket_t snap;
     uint8_t print_counter = 0;
+    uint32_t timeOffset = sensor_get_tick_ms();
     static bool loggingFlag;
+
+    ESP_LOGI(TAG, "Entering vSDLoggerTask...");
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(LOGGING_SAMPLE_RATE_MS));
 
         fused_snapshot(&snap);
 
-        record.timestamp_s   = snap.currTick_ms / 1000.0f;
+        record.timestamp_s   = (float)(snap.currTick_ms - timeOffset) / 1000.0f;
         record.accel.axis    = snap.currAcc.axis;
         record.baro.pressure = snap.currPress;
         record.baro.temp     = snap.currTempF;
@@ -404,11 +430,15 @@ static void vSdLoggerTask(void *pvParameters)
             if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {     
                 write_packet(record);
                 LED_setPattern(led_sd_tx, pattern_fast_blink);
+                can_telemetry_set_status_bit(CAN_TLM_FLAG_SD_LOGGING, true);
                 xSemaphoreGive(xSemaphore);
             }
         }
+        else {
+            can_telemetry_set_status_bit(CAN_TLM_FLAG_SD_LOGGING, false);
+        }
 
-        if (print_counter++ % 50 == 0) {
+        if (print_counter++ % 10 == 0) {
             ESP_LOGI("AHRS", "\tYaw: %d deg \tPitch: %d deg \tRoll: %d deg",
                 (int)snap.orientation.angle.yaw, (int)snap.orientation.angle.pitch,
                 (int)snap.orientation.angle.roll);

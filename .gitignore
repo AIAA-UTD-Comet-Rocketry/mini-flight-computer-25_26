@@ -13,3 +13,5 @@ build/
 .vscode/
 # Python virtual env
 venv/
+
+.claude/
