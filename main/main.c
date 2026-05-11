@@ -168,13 +168,9 @@ void app_main(void) {
                            4 * MIN_STACK_SIZE,
                            NULL,
                            2,
-                           (void*)&xFsmTaskHandle);
+                           &xFsmTaskHandle);
     if (task_ret == pdPASS) {
-        if (xFsmTaskHandle != NULL) {
-            vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
-        } else {
-            task_ret = pdFAIL;
-        }
+        vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
     }
     xTaskResumeAll();
     if (task_ret != pdPASS) {
