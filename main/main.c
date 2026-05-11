@@ -394,14 +394,16 @@ static void vSdLoggerTask(void *pvParameters)
 
         if (record.flightState == STATE_DISARM && loggingFlag) {
             ESP_LOGI(TAG, "Rocket Landed. Stopping live telemetry logging...");
-            loggingFlag = false;
             sd_safe_unmount();
+            LED_setPattern(led_sd_tx, pattern_off);
+            loggingFlag = false;
         }
         loggingFlag = sd_logger_is_active();
 
         if (loggingFlag) {
             if (xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE) {     
                 write_packet(record);
+                LED_setPattern(led_sd_tx, pattern_fast_blink);
                 xSemaphoreGive(xSemaphore);
             }
         }
