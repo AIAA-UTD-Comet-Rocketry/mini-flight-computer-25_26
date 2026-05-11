@@ -129,14 +129,14 @@ void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", senso
  */
 bool idleExitTransition(void)
 {
-  transDelay = UINT32_MAX; //armed state requires large delay time
+  transDelay = UINT32_MAX; // armed state requires large delay time
+  altOffset = gAltitude; // get current ground altitude to offset for altitude threshold calcs
   return true;
 }
 
 bool armedExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
-  altOffset = gAltitude;
 
   // Look for launch
   if(gTotalAcc > LAUNCH_ACC_THRESH_G)
@@ -155,7 +155,6 @@ bool armedExitTransition(void)
   {
     transDelay = UINT32_MAX; // one bad reading resets debounce timer
   }
-
   return false;
 }
 
