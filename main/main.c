@@ -169,12 +169,16 @@ void app_main(void) {
                            NULL,
                            2,
                            (void*)&xFsmTaskHandle);
-    if (task_ret == pdPASS && xFsmTaskHandle != NULL) {
-        vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
+    if (task_ret == pdPASS) {
+        if (xFsmTaskHandle != NULL) {
+            vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
+        } else {
+            task_ret = pdFAIL;
+        }
     }
     xTaskResumeAll();
-    if (task_ret != pdPASS || xFsmTaskHandle == NULL) {
-        ESP_LOGE(TAG, "FSM task failed to create!");
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "FSM task create/suspend failed!");
         abort();
     }
 
