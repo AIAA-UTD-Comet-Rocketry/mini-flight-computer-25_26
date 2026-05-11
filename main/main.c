@@ -162,14 +162,21 @@ void app_main(void) {
                            2,
                            &xAltTaskHandle);
 
+    vTaskSuspendAll();
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
                            4 * MIN_STACK_SIZE,
                            NULL,
-                           2,  
+                           2,
                            (void*)&xFsmTaskHandle);
-    CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
-    vTaskSuspend( xFsmTaskHandle ); // Suspend task until sensors are stabilized
+    if (task_ret == pdPASS && xFsmTaskHandle != NULL) {
+        vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
+    }
+    xTaskResumeAll();
+    if (task_ret != pdPASS || xFsmTaskHandle == NULL) {
+        ESP_LOGE(TAG, "FSM task failed to create!");
+        abort();
+    }
 
     task_ret = xTaskCreate(vSdLoggerTask,
                             "SD Logger",
