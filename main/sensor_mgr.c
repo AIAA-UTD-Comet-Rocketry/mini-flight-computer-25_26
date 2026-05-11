@@ -5,9 +5,22 @@
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
 #include "main.h"
+#include "dsps_biquad.h"
 
 static const char *TAG = "SensorMgr";
 static portMUX_TYPE vel_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// 2nd-order Butterworth low-pass, fc=5 Hz, fs=100 Hz.
+// Coefficients from scipy.signal.butter(N=2, Wn=5.0, fs=100.0).
+// DC gain = 1.0000000 (verified). Poles at |z|=0.8008 (stable).
+static float s_press_lpf_coef[5] = {
+    0.020083366f,   // b0
+    0.040166731f,   // b1
+    0.020083366f,   // b2
+   -1.561018076f,   // a1
+    0.641351538f    // a2
+};
+static float s_press_lpf_w[2] = {0.0f, 0.0f};  // delay-line state
 
 // Shared flight data globals
 float gTotalAcc = 0;
@@ -17,6 +30,13 @@ float gGyro[3] = {0};
 float gOrient[3] = {0};
 float gVerticalVelocity_fps = 0;
 uint8_t gPyroStatus = 0;
+
+float sensor_pressure_filter(float raw_hpa)
+{
+    float out = 0.0f;
+    dsps_biquad_f32(&raw_hpa, &out, 1, s_press_lpf_coef, s_press_lpf_w);
+    return out;
+}
 
 void sensor_set_ground_pressure(float pressure_hpa) {
     GROUND_PRESSURE_HPA = pressure_hpa;

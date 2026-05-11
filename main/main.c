@@ -326,16 +326,16 @@ static void vAltHandlerTask(void *pvParameters)
     AltData_t alt_data;
     float verticalVel = 0;
 
+    sensor_set_ground_pressure(SEA_LEVEL_PRESSURE_HPA);
+
     while(1) {
         LPS22DF_PRESS_GetPressure(alt, &alt_data.pressure);
         LPS22DF_TEMP_GetTemperature(alt, &alt_data.temp);
 
         if (alt_data.pressure && alt_data.temp != LPS22DF_ERROR) {
-            // Only re-zero ground pressure while the rocket is physically on
-            // the pad. Apogee/descent free-fall must NOT update the reference.
-            // if (flight_state.currentState == STATE_IDLE || flight_state.currentState == STATE_ARMED) {
-            //     sensor_track_ground_pressure(alt_data.pressure);
-            // }
+
+            // Filter pressure readings using 2nd order butterworth filter
+            alt_data.pressure = sensor_pressure_filter(alt_data.pressure);
             alt_data.altitude = sensor_get_altitude(alt_data.pressure, alt_data.temp);
             sensor_velocity_correct(alt_data.altitude, sensor_get_tick_ms());
         }
@@ -407,13 +407,13 @@ static void vSdLoggerTask(void *pvParameters)
         }
 
         if (print_counter++ % 50 == 0) {
-            ESP_LOGI("AHRS", "\tYaw: %d deg\tPitch: %d deg\tRoll: %d deg",
+            ESP_LOGI("AHRS", "\tYaw: %d deg \tPitch: %d deg \tRoll: %d deg",
                 (int)snap.orientation.angle.yaw, (int)snap.orientation.angle.pitch,
                 (int)snap.orientation.angle.roll);
-            ESP_LOGI("IMU", "Accel: \tX: %.1f,\tY: %.1f,\tZ: %.1f",
+            ESP_LOGI("IMU", "\tAccel: \tX: %.1f, \tY: %.1f, \tZ: %.1f",
                 snap.currAcc.axis.x, snap.currAcc.axis.y, snap.currAcc.axis.z);
             ESP_LOGI("IMU", "\tTotal Accel: %.1f g", snap.gTotalAcc);
-            ESP_LOGI("BARO", "\tPressure: %.1f hPa, \tTemp: %.1f F",
+            ESP_LOGI("BARO", "\tPress: %.1f hPa, \tTemp: %.1f F",
                 snap.currPress, snap.currTempF);
             ESP_LOGI("BARO", "\tAltitude: %.1f ft", snap.gAltitude);
             ESP_LOGI("FUSION", "\tVertical Velocity: %.1f ft/s", snap.gVerticalVelocity);

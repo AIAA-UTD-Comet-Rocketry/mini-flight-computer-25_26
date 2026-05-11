@@ -9,4 +9,4 @@ idf_component_register(SRCS "imu_calibration.c" "sd_logger.c" "sensor_mgr.c"
                                 "esp_timer"
                                 "espcoredump"
 
-                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X CanAero FlightFSM Fusion fatfs nvs_flash)
+                       PRIV_REQUIRES IIS2MDC LPS22DF LSM6DSV80X CanAero FlightFSM Fusion fatfs nvs_flash espressif__esp-dsp)

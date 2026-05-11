@@ -75,6 +75,10 @@ extern float gOrient[3];
 extern float gVerticalVelocity_fps;  // vertical velocity from baro (ft/s, +up)
 extern uint8_t gPyroStatus;   // pyro fired bitmask (bit 0-3 = channels 1-4)
 
+// Apply 2nd-order Butterworth IIR LPF (fc=5 Hz) to raw barometric pressure.
+// Call from a single task only — state is not thread-safe.
+float sensor_pressure_filter(float raw_hpa);
+
 // Complementary filter on vertical velocity.
 // earth_z_g is Fusion earth accel Z in g
 // Predict: integrate earth z accel into gVerticalVelocity. Call
