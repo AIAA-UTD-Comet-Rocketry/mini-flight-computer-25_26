@@ -124,14 +124,6 @@ void app_main(void) {
     load_params();
     init_AHRS();
 
-    // Sample ambient pressure for ~1 s and use as the altitude=0 reference
-    // if (baro_calibrate_ground(mini_fc_handle->lps22df_handle) != ESP_OK) {
-    //     ESP_LOGW(TAG, "Ground pressure cal failed, falling back to sea-level default.");
-    //     can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, false);
-    // } else {
-    //     can_telemetry_set_status_bit(CAN_TLM_FLAG_GROUND_PRESS_VALID, true);
-    // }
-
     /// Flight State Machine
     initFlightState(&flight_state);
     registerFlightState(&flight_state);  // bind for getCurrentFlightState()
@@ -167,15 +159,11 @@ void app_main(void) {
                            "Flight FSM",
                            4 * MIN_STACK_SIZE,
                            NULL,
-                           2,
-                           &xFsmTaskHandle);
-    if (task_ret == pdPASS) {
+                           2,  
+                           (void*)&xFsmTaskHandle);
+    CHECK_TASK_CREATION(task_ret, "FSM task failed to create!");
+    if (task_ret == pdPASS && xFsmTaskHandle != NULL) {
         vTaskSuspend(xFsmTaskHandle); // Suspend task until sensors are stabilized
-    }
-    xTaskResumeAll();
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "FSM task create/suspend failed!");
-        abort();
     }
 
     task_ret = xTaskCreate(vSdLoggerTask,
@@ -185,7 +173,9 @@ void app_main(void) {
                             1,
                             (void*)&xSdLoggerHandle);
     CHECK_TASK_CREATION(task_ret, "SD Logger task failed to create!");
-    vTaskSuspend( xSdLoggerHandle ); // Suspend task until sensors are stabilized
+    if (task_ret == pdPASS && xSdLoggerHandle != NULL) {
+        vTaskSuspend(xSdLoggerHandle); // Suspend task until sensors are stabilized
+    }
 
     task_ret = xTaskCreate((TaskFunction_t)LED_Task, "LED MGR", 2 * MIN_STACK_SIZE, (void *)&mini_fc_handle, 0, &xLEDTaskHandle);
     CHECK_TASK_CREATION(task_ret, "LED task failed to create!");
