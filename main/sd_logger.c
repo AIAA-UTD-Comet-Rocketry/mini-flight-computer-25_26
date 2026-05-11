@@ -62,7 +62,7 @@ static int find_next_log_number(void) {
 
 esp_err_t sd_logger_init(void) {
     // Configure SDMMC host
-    slot_config.width = 4;
+    slot_config.width = 1; // changed from 4 to 1 to reduce current consumption (prevents flash power loss)
     slot_config.clk = SD_CLK_GPIO_NUM;
     slot_config.cmd = SD_CMD_GPIO_NUM;
     slot_config.d0  = SD_DATA0_GPIO_NUM;
