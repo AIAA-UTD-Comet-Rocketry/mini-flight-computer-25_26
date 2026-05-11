@@ -154,6 +154,7 @@ void app_main(void) {
                            2,
                            &xAltTaskHandle);
 
+    vTaskSuspendAll();
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
                            4 * MIN_STACK_SIZE,
