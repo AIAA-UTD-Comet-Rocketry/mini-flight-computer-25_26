@@ -28,10 +28,10 @@ extern "C" {
     int LED_setPattern(int led, int pattern);
 }
 static const int kLedCanTx          = 1; // led_can_tx
-static const int kPatternFastBlink  = 5; // pattern_fast_blink
+static const int kPatternFastFlash  = 8; // pattern_fast_flash
 
 static void pulse_can_tx_led(void) {
-    LED_setPattern(kLedCanTx, kPatternFastBlink);
+    LED_setPattern(kLedCanTx, kPatternFastFlash);
 }
 
 static const char *TAG = "CanTLM";

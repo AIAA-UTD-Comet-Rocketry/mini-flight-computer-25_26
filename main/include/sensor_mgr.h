@@ -24,9 +24,6 @@
 #define PRESS_CAL_SAMPLE_DELAY_MS   10
 #define SEA_LEVEL_PRESSURE_HPA      1013.25
 
-static float GROUND_PRESSURE_HPA = 1013.25f; // default sea level pressure
-static float gVerticalVelocity = 0.0f;   // complementary-filtered, ft/s
-
 /**
  * Board-to-rocket axis alignment.
  * Letters describe how the SENSOR axes map to the BODY (rocket) axes:
@@ -75,6 +72,10 @@ extern float gOrient[3];
 extern float gVerticalVelocity_fps;  // vertical velocity from baro (ft/s, +up)
 extern uint8_t gPyroStatus;   // pyro fired bitmask (bit 0-3 = channels 1-4)
 
+// Apply 2nd-order Butterworth IIR LPF (fc=5 Hz) to raw barometric pressure.
+// Call from a single task only — state is not thread-safe.
+float sensor_pressure_filter(float raw_hpa);
+
 // Complementary filter on vertical velocity.
 // earth_z_g is Fusion earth accel Z in g
 // Predict: integrate earth z accel into gVerticalVelocity. Call
@@ -91,9 +92,6 @@ void sensor_set_ground_pressure(float pressure_hpa);
 
 // Read the stored ground reference (used by alt task each cycle)
 float sensor_get_ground_pressure(void);
-
-// Sample LPS22DF ~1 s, average, and store as ground reference. Blocking.
-esp_err_t baro_calibrate_ground(LPS22DF_Object_t *baro);
 
 // Slowly re-zero the stored ground pressure with one EMA step. The caller
 // MUST only call this while the rocket is on the pad (FSM in IDLE/ARMED) —

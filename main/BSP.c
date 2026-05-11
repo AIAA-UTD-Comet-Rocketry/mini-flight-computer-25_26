@@ -396,6 +396,8 @@ static esp_err_t bsp_lps22df_init(void)
     ret |= LPS22DF_TEMP_Enable(&lps22df_handle);
     ret |= LPS22DF_PRESS_SetOutputDataRate(&lps22df_handle, 100.0f);
     ret |= LPS22DF_TEMP_SetOutputDataRate(&lps22df_handle, 100.0f);
+    ret |= LPS22DF_Set_AVG(&lps22df_handle, LPS22DF_64_AVG);
+    ret |= LPS22DF_Set_LPF(&lps22df_handle, LPS22DF_LPF_ODR_DIV_9); 
 
     if (ret != LPS22DF_OK)
     {

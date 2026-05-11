@@ -129,14 +129,14 @@ void enterLanded(void)         { ESP_LOGW(TAG, "Entered LANDED at %lu ms", senso
  */
 bool idleExitTransition(void)
 {
-  transDelay = UINT32_MAX; //armed state requires large delay time
+  transDelay = UINT32_MAX; // armed state requires large delay time
+  altOffset = gAltitude; // get current ground altitude to offset for altitude threshold calcs
   return true;
 }
 
 bool armedExitTransition(void)
 {
   uint32_t uwTick = sensor_get_tick_ms();
-  altOffset = gAltitude;
 
   // Look for launch
   if(gTotalAcc > LAUNCH_ACC_THRESH_G)
@@ -155,7 +155,6 @@ bool armedExitTransition(void)
   {
     transDelay = UINT32_MAX; // one bad reading resets debounce timer
   }
-
   return false;
 }
 
@@ -236,13 +235,13 @@ bool drogueDescentExitTransition(void)
   // Latch each main charge so it fires exactly once. Without latching the
   // FSM re-notifies every 10 ms tick while alt is below threshold, which
   // backs up the pyro task's notification queue.
-  if(!main1Fired && gAltitude < MAIN_DEPLOY_ALT_FT)
+  if(!main1Fired && gAltitude < (MAIN_DEPLOY_ALT_FT + altOffset))
   {
     xTaskNotify(xPyroTaskHandle, PYRO_MAIN1_BIT, eSetBits);
     main1Fired = 1;
   }
 
-  if(!main2Fired && gAltitude < MAIN_BKP_DEPLOY_ALT_FT)
+  if(!main2Fired && gAltitude < (MAIN_BKP_DEPLOY_ALT_FT + altOffset))
   {
     xTaskNotify(xPyroTaskHandle, PYRO_MAIN2_BIT, eSetBits);
     main2Fired = 1;

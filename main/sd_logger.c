@@ -27,7 +27,7 @@ static const char *file_header =
         "flight_state,"
         "drogue1,drogue2,main1,main2\n";
 
-static FILE *log_file = NULL;
+// static FILE *log_file = NULL;
 
 // Global variables for the SD card
 static sdmmc_host_t host = SDMMC_HOST_DEFAULT();
@@ -62,7 +62,7 @@ static int find_next_log_number(void) {
 
 esp_err_t sd_logger_init(void) {
     // Configure SDMMC host
-    slot_config.width = 4;
+    slot_config.width = 1; // changed from 4 to 1 to reduce current consumption (prevents flash power loss)
     slot_config.clk = SD_CLK_GPIO_NUM;
     slot_config.cmd = SD_CMD_GPIO_NUM;
     slot_config.d0  = SD_DATA0_GPIO_NUM;
@@ -128,10 +128,11 @@ esp_err_t sd_write_log(const void* data, size_t len) {
     FRESULT res = f_write(&internal_log_file, data, len, &written);
     if(res != FR_OK || written != len) {
         ESP_LOGE(TAG, "f_write failed: res=%d written=%u", res, written);
-        reset_sd();
+        f_close(&internal_log_file); // best-effort close before any unmount 
+        file_open = false; // stop all writes immediately
+        esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, card);
         return ESP_FAIL;
     }
-
     return ESP_OK;
 }
 
