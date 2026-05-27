@@ -141,7 +141,7 @@ void app_main(void) {
 
     task_ret = xTaskCreate(vImuHandlerTask,
                            "IMU",
-                           5 * MIN_STACK_SIZE,
+                           6 * MIN_STACK_SIZE,
                            (void*)mini_fc_handle->lsm6dsv80x_handle,
                            2,
                            &xImuTaskHandle);
@@ -154,7 +154,6 @@ void app_main(void) {
                            2,
                            &xAltTaskHandle);
 
-    vTaskSuspendAll();
     task_ret = xTaskCreate(vFsmTask,
                            "Flight FSM",
                            4 * MIN_STACK_SIZE,
